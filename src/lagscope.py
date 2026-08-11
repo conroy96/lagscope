@@ -18,6 +18,7 @@ import re
 import subprocess
 # STANDARD LIBRARY: time provides sleep(), which pauses the current program.
 import time
+import socket
 # STANDARD LIBRARY: dataclass generates data-storage methods for a class.
 from dataclasses import dataclass
 # STANDARD LIBRARY: datetime and timezone create a UTC timestamp.
@@ -50,6 +51,15 @@ class ProbeSummary:
     average_latency_ms: float | None
     maximum_latency_ms: int | None
     average_jitter_ms: float | None
+
+# PROJECT CODE: DiagnosticCheck records the outcome of one dependency check.
+@dataclass
+class DiagnosticCheck:
+    """The result of checking one network dependency."""
+
+    name: str
+    success: bool
+    detail: str
 
 
 # PROJECT FUNCTION: inspect Windows ping text for known failure phrases.
@@ -103,6 +113,55 @@ def find_failure_message(ping_output: str, error_output: str) -> str:
                 return line.strip()
 
     return "no ICMP echo reply received"
+
+
+
+# PROJECT FUNCTION: extract the gateway from Windows route-table output.
+def extract_default_gateway(route_output: str) -> str | None:
+    """Return the gateway from the first IPv4 default-route row."""
+
+    for line in route_output.splitlines():
+        fields = line.split()
+
+        # Header and blank lines do not contain five route fields.
+        if len(fields) < 5:
+            continue
+
+        destination_is_default = fields[0] == "0.0.0.0"
+        netmask_is_default = fields[1] == "0.0.0.0"
+
+        if destination_is_default:
+            if netmask_is_default:
+                gateway = fields[2]
+                return gateway
+    return None
+
+
+# PROJECT FUNCTION: run the Windows route command and discover the gateway.
+def discover_default_gateway() -> str | None:
+    """Run route.exe and return the active IPv4 default gateway."""
+
+    command = ["route", "print", "-4", "0.0.0.0"]
+
+    try:
+        route_process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    except OSError:
+        return None
+
+    if route_process.returncode != 0:
+        return None
+
+    route_output = route_process.stdout
+    gateway = extract_default_gateway(route_output)
+    return gateway
 
 
 # PROJECT FUNCTION: extract the numerical latency from successful ping text.
@@ -215,6 +274,177 @@ def ping_once(target: str, timeout_ms: int) -> ProbeResult:
         latency_ms=latency_ms,
         error=None,
     )
+
+# PROJECT FUNCTION: discover and test the local IPv4 default gateway.
+def check_default_gateway(timeout_ms: int) -> DiagnosticCheck:
+    """Return a diagnostic result for the local default gateway."""
+
+    gateway = discover_default_gateway()
+
+    if gateway is None:
+        return DiagnosticCheck(
+            name="Default gateway",
+            success=False,
+            detail="No IPv4 default route was found",
+        )
+
+    probe_result = ping_once(gateway, timeout_ms)
+
+    if probe_result.success:
+        if probe_result.latency_ms is not None:
+            detail = f"{gateway} replied in {probe_result.latency_ms} ms"
+        else:
+            detail = f"{gateway} replied; latency was unavailable"
+
+        return DiagnosticCheck(
+            name="Default gateway",
+            success=True,
+            detail=detail,
+        )
+
+    if probe_result.error is not None:
+        failure_reason = probe_result.error
+    else:
+        failure_reason = "no ICMP echo reply was received"
+
+    detail = f"{gateway} failed: {failure_reason}"
+
+    return DiagnosticCheck(
+        name="Default gateway",
+        success=False,
+        detail=detail,
+    )
+def check_public_ip(target: str, timeout_ms: int) -> DiagnosticCheck:
+    """Test routed Internet connectivity using a known public IP address."""
+
+    # PROJECT FUNCTION: ping_once() always returns a ProbeResult object.
+    # We inspect the object's success field to learn whether the probe worked.
+    public_ip_result = ping_once(target, timeout_ms)
+
+    if public_ip_result.success:
+        if public_ip_result.latency_ms is not None:
+            detail = f"{target} replied in {public_ip_result.latency_ms} ms"
+        else:
+            detail = f"{target} replied; latency was unavailable"
+
+        return DiagnosticCheck(
+            name="Public IP",
+            success=True,
+            detail=detail,
+        )
+
+    # A failed ProbeResult should normally contain an error explanation.
+    # The fallback keeps this function safe if that explanation is ever absent.
+    if public_ip_result.error is not None:
+        failure_reason = public_ip_result.error
+    else:
+        failure_reason = "no ICMP echo reply was received"
+
+    detail = f"{target} failed: {failure_reason}"
+
+    return DiagnosticCheck(
+        name="Public IP",
+        success=False,
+        detail=detail,
+    )
+
+def check_dns(hostname: str) -> DiagnosticCheck:
+    """Test whether Windows can resolve a hostname into an IP address."""
+
+    try:
+        resolved_ip = socket.gethostbyname(hostname)
+    except socket.gaierror as error:
+        detail = f"{hostname} could not be resolved: {error}"
+
+        return DiagnosticCheck(
+            name="DNS resolution",
+            success=False,
+            detail=detail,
+        )
+
+    detail = f"{hostname} resolved to {resolved_ip}"
+
+    return DiagnosticCheck(
+        name="DNS resolution",
+        success=True,
+        detail=detail,
+    )
+
+
+def check_tcp_service(
+    hostname: str,
+    port: int,
+    timeout_ms: int,
+) -> DiagnosticCheck:
+    """Test whether a TCP connection can be established to a service port."""
+
+    # socket.create_connection() expects its timeout in seconds, whereas the
+    # LagScope command line accepts milliseconds. Dividing by 1000 converts it.
+    timeout_seconds = timeout_ms / 1000
+
+    # STANDARD LIBRARY: socket.create_connection() asks the operating system to
+    # establish a TCP connection. The tuple identifies the remote endpoint:
+    # hostname identifies the node, and port identifies the service on it.
+    try:
+        connection = socket.create_connection(
+            (hostname, port),
+            timeout=timeout_seconds,
+        )
+    except OSError as error:
+        # Python networking failures such as a refusal or timeout are represented
+        # by OSError subclasses. Catching them prevents the whole tool crashing.
+        detail = f"{hostname}:{port} could not establish TCP: {error}"
+
+        return DiagnosticCheck(
+            name="TCP service",
+            success=False,
+            detail=detail,
+        )
+
+    # STANDARD LIBRARY METHOD: close() releases this test connection immediately.
+    # LagScope only needs to prove that the TCP handshake can be established.
+    connection.close()
+
+    detail = f"{hostname}:{port} accepted a TCP connection"
+
+    return DiagnosticCheck(
+        name="TCP service",
+        success=True,
+        detail=detail,
+    )
+
+def diagnose_dependencies(
+    gateway_check: DiagnosticCheck,
+    public_ip_check: DiagnosticCheck,
+    dns_check: DiagnosticCheck,
+    tcp_check: DiagnosticCheck,
+) -> str:
+    """Identify the earliest failed dependency in the network path."""
+
+    if not gateway_check.success:
+        return "Likely local network problem: the default gateway was unreachable."
+
+    if not public_ip_check.success:
+        return "Likely Internet path problem: the gateway worked but the public IP failed."
+
+    if not dns_check.success:
+        return "Likely DNS problem: Internet routing worked but name resolution failed."
+
+    if not tcp_check.success:
+        return "Likely service-path problem: DNS worked but the TCP connection failed."
+
+    return "No dependency failure detected."
+
+
+def display_diagnostic_check(check: DiagnosticCheck) -> None:
+    """Display one dependency check in a consistent format."""
+
+    if check.success:
+        status = "PASS"
+    else:
+        status = "FAIL"
+
+    print(f"[{status}] {check.name}: {check.detail}")
 
 
 def display_probe_result(
@@ -353,6 +583,18 @@ def read_command_line_settings() -> argparse.Namespace:
         help="IP address or hostname to probe (default: 8.8.8.8)",
     )
     parser.add_argument(
+    "--service-host",
+    default="example.com",
+    help="Hostname to test with DNS and TCP (default: example.com)",
+    )
+
+    parser.add_argument(
+        "--service-port",
+        type=int,
+        default=443,
+        help="TCP service port to test (default: 443)",
+    )
+    parser.add_argument(
         "--timeout-ms",
         type=int,
         default=1000,
@@ -389,7 +631,11 @@ def read_command_line_settings() -> argparse.Namespace:
     if settings.interval < 0:
         parser.error("--interval must be 0 or greater")
 
-   
+    if settings.service_port < 1:
+        parser.error("--service-port must be between 1 and 65535")
+
+    if settings.service_port > 65535:
+        parser.error("--service-port must be between 1 and 65535")
 
     return settings
 
@@ -400,6 +646,34 @@ def read_command_line_settings() -> argparse.Namespace:
 def main() -> None:
     settings = read_command_line_settings()
 
+    print("Dependency checks")
+    gateway_check = check_default_gateway(settings.timeout_ms)
+    display_diagnostic_check(gateway_check)
+
+    public_ip_check = check_public_ip("1.1.1.1", settings.timeout_ms)
+    display_diagnostic_check(public_ip_check)
+
+    dns_check = check_dns(settings.service_host)
+    display_diagnostic_check(dns_check)
+
+    tcp_check = check_tcp_service(
+    settings.service_host,
+    settings.service_port,
+    settings.timeout_ms,
+    )
+    display_diagnostic_check(tcp_check)
+
+    diagnosis = diagnose_dependencies(
+    gateway_check,
+    public_ip_check,
+    dns_check,
+    tcp_check,
+    )
+
+    print("\nDiagnosis")
+    print(diagnosis)
+
+    print("\nTarget monitoring")
     results = run_probes(
         target=settings.target,
         timeout_ms=settings.timeout_ms,

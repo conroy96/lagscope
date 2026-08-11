@@ -1,0 +1,12 @@
+# Project-local Python environment. Recreate it; do not commit it.
+.venv/
+
+# Python-generated cache files.
+__pycache__/
+*.py[cod]
+
+# LagScope output generated while the program runs.
+output/
+
+# Local scratchpad used while learning Python; not part of the application.
+practice.py

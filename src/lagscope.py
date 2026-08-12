@@ -780,10 +780,65 @@ def save_results_to_csv(file_path: str, results: list[ProbeResult]) -> None:
             )
 
 
-def display_summary(summary: ProbeSummary) -> None:
+def create_session_csv_path() -> str:
+    """Create a unique default path for one monitoring session."""
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    output_path = Path("output") / f"lagscope-session-{timestamp}.csv"
+    return str(output_path)
+
+
+def save_path_observations_to_csv(
+    file_path: str,
+    observations: list[PathObservation],
+) -> None:
+    """Save paired gateway/public evidence and diagnoses to a CSV file."""
+
+    output_path = Path(file_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open(
+        mode="w",
+        newline="",
+        encoding="utf-8",
+    ) as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(
+            [
+                "observation_timestamp_utc",
+                "diagnosis",
+                "gateway_target",
+                "gateway_success",
+                "gateway_latency_ms",
+                "gateway_error",
+                "public_target",
+                "public_success",
+                "public_latency_ms",
+                "public_error",
+            ]
+        )
+
+        for observation in observations:
+            writer.writerow(
+                [
+                    observation.timestamp,
+                    observation.diagnosis,
+                    observation.gateway_result.target,
+                    observation.gateway_result.success,
+                    observation.gateway_result.latency_ms,
+                    observation.gateway_result.error,
+                    observation.public_result.target,
+                    observation.public_result.success,
+                    observation.public_result.latency_ms,
+                    observation.public_result.error,
+                ]
+            )
+
+
+def display_summary(summary: ProbeSummary, heading: str = "Summary") -> None:
     """Display aggregate statistics calculated from all probes."""
 
-    print("\nSummary")
+    print(f"\n{heading}")
     print(f"Sent:        {summary.sent_count}")
     print(f"Received:    {summary.received_count}")
     print(f"Lost:        {summary.lost_count}")
@@ -951,20 +1006,32 @@ def main() -> None:
         interval=settings.interval,
     )
 
+    if not observations:
+        print("\nNo monitoring observations were collected.")
+        return
+
     # The existing summary and CSV functions accept a list of ProbeResult
-    # objects. Extract the public result from each paired observation so those
-    # existing functions remain usable during this development checkpoint.
+    # objects. Extract each side of the paired observations into its own list.
+    gateway_results: list[ProbeResult] = []
     public_results: list[ProbeResult] = []
 
     for observation in observations:
+        gateway_results.append(observation.gateway_result)
         public_results.append(observation.public_result)
 
-    summary = calculate_summary(public_results)
-    display_summary(summary)
+    gateway_summary = calculate_summary(gateway_results)
+    public_summary = calculate_summary(public_results)
 
-    if settings.csv is not None:
-        save_results_to_csv(settings.csv, public_results)
-        print(f"\nCSV saved to: {settings.csv}")
+    display_summary(gateway_summary, "Gateway summary")
+    display_summary(public_summary, "Public target summary")
+
+    if settings.csv is None:
+        csv_path = create_session_csv_path()
+    else:
+        csv_path = settings.csv
+
+    save_path_observations_to_csv(csv_path, observations)
+    print(f"\nCSV saved to: {csv_path}")
 
 # PYTHON RUNTIME CONVENTION: when this file is run directly, Python sets
 # __name__ to "__main__". This prevents main() running if another file imports

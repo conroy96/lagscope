@@ -101,6 +101,28 @@ class CalculateSummaryTests(unittest.TestCase):
         self.assertEqual(summary.maximum_latency_ms, 8)
         self.assertIsNone(summary.average_jitter_ms)
 
+    def test_successful_reply_without_parsed_latency_is_still_received(self) -> None:
+        results = [
+            ProbeResult(
+                target="test-target",
+                timestamp="time-1",
+                success=True,
+                latency_ms=None,
+                error=None,
+            )
+        ]
+
+        summary = calculate_summary(results)
+
+        self.assertEqual(summary.sent_count, 1)
+        self.assertEqual(summary.received_count, 1)
+        self.assertEqual(summary.lost_count, 0)
+        self.assertEqual(summary.packet_loss_percent, 0.0)
+        self.assertIsNone(summary.minimum_latency_ms)
+        self.assertIsNone(summary.average_latency_ms)
+        self.assertIsNone(summary.maximum_latency_ms)
+        self.assertIsNone(summary.average_jitter_ms)
+
 
 if __name__ == "__main__":
     unittest.main()

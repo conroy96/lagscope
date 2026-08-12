@@ -12,17 +12,22 @@ Run one Windows ping probe and report the result in a predictable format.
 
 # STANDARD LIBRARY: argparse reads and validates command-line options.
 import argparse
+# STANDARD LIBRARY: csv writes probe records in a spreadsheet-friendly format.
+import csv
 # STANDARD LIBRARY: re searches text using regular-expression patterns.
 import re
+# STANDARD LIBRARY: socket provides DNS lookups and TCP connections.
+import socket
 # STANDARD LIBRARY: subprocess starts another program and captures its result.
 import subprocess
 # STANDARD LIBRARY: time provides sleep(), which pauses the current program.
 import time
-import socket
 # STANDARD LIBRARY: dataclass generates data-storage methods for a class.
 from dataclasses import dataclass
 # STANDARD LIBRARY: datetime and timezone create a UTC timestamp.
 from datetime import datetime, timezone
+# STANDARD LIBRARY: Path provides readable, cross-platform file-path operations.
+from pathlib import Path
 
 
 # STANDARD LIBRARY: @dataclass generates ProbeResult.__init__ for us.
@@ -499,14 +504,20 @@ def run_probes(
 def calculate_summary(results: list[ProbeResult]) -> ProbeSummary:
     """Calculate packet loss, latency, and simplified jitter statistics."""
 
+    received_count = 0
     successful_latencies: list[int] = []
 
     for probe_result in results:
+        # A successful reply still counts as received even if latency parsing
+        # was unavailable for that particular Windows ping output.
+        if probe_result.success:
+            received_count = received_count + 1
+
+        # Only numeric latency values can participate in latency calculations.
         if probe_result.success and probe_result.latency_ms is not None:
             successful_latencies.append(probe_result.latency_ms)
 
     sent_count = len(results)
-    received_count = len(successful_latencies)
     lost_count = sent_count - received_count
     packet_loss_percent = (lost_count / sent_count) * 100
 
@@ -544,6 +555,46 @@ def calculate_summary(results: list[ProbeResult]) -> ProbeSummary:
         maximum_latency_ms=maximum_latency_ms,
         average_jitter_ms=average_jitter_ms,
     )
+
+
+def save_results_to_csv(file_path: str, results: list[ProbeResult]) -> None:
+    """Save timestamped probe evidence to a CSV file."""
+
+    # STANDARD LIBRARY CLASS: Path converts command-line text into an object
+    # with methods for creating folders and opening the output file.
+    output_path = Path(file_path)
+
+    # STANDARD LIBRARY METHOD: mkdir() creates the parent directory. parents=True
+    # creates any missing directories in the path; exist_ok=True prevents an error
+    # when the directory already exists.
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # PYTHON SYNTAX: with automatically closes the file when this block finishes,
+    # including if an unexpected error occurs while rows are being written.
+    with output_path.open(
+        mode="w",
+        newline="",
+        encoding="utf-8",
+    ) as csv_file:
+        # STANDARD LIBRARY: csv.writer() creates an object that converts Python
+        # values into correctly escaped comma-separated rows.
+        writer = csv.writer(csv_file)
+
+        # STANDARD LIBRARY METHOD: writerow() writes one complete CSV row.
+        writer.writerow(
+            ["target", "timestamp_utc", "success", "latency_ms", "error"]
+        )
+
+        for result in results:
+            writer.writerow(
+                [
+                    result.target,
+                    result.timestamp,
+                    result.success,
+                    result.latency_ms,
+                    result.error,
+                ]
+            )
 
 
 def display_summary(summary: ProbeSummary) -> None:
@@ -616,6 +667,12 @@ def read_command_line_settings() -> argparse.Namespace:
 
     )
 
+    parser.add_argument(
+    "--csv",
+    default=None,
+    help="Optional path for saving timestamped probe results as CSV",
+    )
+
     # STANDARD LIBRARY METHOD: .parse_args() reads the arguments supplied in
     # PowerShell and returns an argparse.Namespace containing their values.
     settings = parser.parse_args()
@@ -682,6 +739,10 @@ def main() -> None:
     )
     summary = calculate_summary(results)
     display_summary(summary)
+
+    if settings.csv is not None:
+        save_results_to_csv(settings.csv, results)
+        print(f"\nCSV saved to: {settings.csv}")
 
 # PYTHON RUNTIME CONVENTION: when this file is run directly, Python sets
 # __name__ to "__main__". This prevents main() running if another file imports

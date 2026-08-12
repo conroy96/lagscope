@@ -6,6 +6,7 @@ from unittest.mock import patch
 from src.lagscope import (
     PathObservation,
     ProbeResult,
+    classify_path_observation,
     collect_path_observation,
     run_path_monitoring,
 )
@@ -21,6 +22,54 @@ def make_successful_probe(target: str, latency_ms: int) -> ProbeResult:
         latency_ms=latency_ms,
         error=None,
     )
+
+
+def make_failed_probe(target: str) -> ProbeResult:
+    """Create predictable failed probe evidence for these tests."""
+
+    return ProbeResult(
+        target=target,
+        timestamp="test-time",
+        success=False,
+        latency_ms=None,
+        error="test failure",
+    )
+
+
+class ClassifyPathObservationTests(unittest.TestCase):
+    """Verify the four reachability classifications."""
+
+    def test_both_fail_suspects_local_path(self) -> None:
+        gateway_result = make_failed_probe("gateway")
+        public_result = make_failed_probe("public")
+
+        diagnosis = classify_path_observation(gateway_result, public_result)
+
+        self.assertEqual(diagnosis, "LOCAL_PATH_SUSPECTED")
+
+    def test_only_public_fails_suspects_upstream_path(self) -> None:
+        gateway_result = make_successful_probe("gateway", 2)
+        public_result = make_failed_probe("public")
+
+        diagnosis = classify_path_observation(gateway_result, public_result)
+
+        self.assertEqual(diagnosis, "UPSTREAM_PATH_SUSPECTED")
+
+    def test_only_gateway_fails_reports_icmp_unavailable(self) -> None:
+        gateway_result = make_failed_probe("gateway")
+        public_result = make_successful_probe("public", 20)
+
+        diagnosis = classify_path_observation(gateway_result, public_result)
+
+        self.assertEqual(diagnosis, "GATEWAY_ICMP_UNAVAILABLE")
+
+    def test_both_succeed_reports_healthy(self) -> None:
+        gateway_result = make_successful_probe("gateway", 2)
+        public_result = make_successful_probe("public", 20)
+
+        diagnosis = classify_path_observation(gateway_result, public_result)
+
+        self.assertEqual(diagnosis, "HEALTHY")
 
 
 class CollectPathObservationTests(unittest.TestCase):
@@ -69,11 +118,13 @@ class RunPathMonitoringTests(unittest.TestCase):
             timestamp="time-1",
             gateway_result=make_successful_probe("gateway", 1),
             public_result=make_successful_probe("public", 10),
+            diagnosis="HEALTHY",
         )
         second_observation = PathObservation(
             timestamp="time-2",
             gateway_result=make_successful_probe("gateway", 2),
             public_result=make_successful_probe("public", 12),
+            diagnosis="HEALTHY",
         )
 
         with patch(

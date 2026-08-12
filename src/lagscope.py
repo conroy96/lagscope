@@ -50,6 +50,7 @@ class PathObservation:
     timestamp: str
     gateway_result: ProbeResult
     public_result: ProbeResult
+    diagnosis: str
 
 
 # PROJECT CODE: ProbeSummary stores statistics calculated from several probes.
@@ -517,6 +518,7 @@ def display_path_observation(
     print(f"Timestamp: {observation.timestamp}")
     print(f"Gateway:  {gateway_measurement}")
     print(f"Public:   {public_measurement}")
+    print(f"Diagnosis: {observation.diagnosis}")
 
 
 def run_probes(
@@ -554,6 +556,25 @@ def create_unavailable_gateway_result(timestamp: str) -> ProbeResult:
     )
 
 
+# PROJECT FUNCTION: classify one paired observation by reachability.
+def classify_path_observation(
+    gateway_result: ProbeResult,
+    public_result: ProbeResult,
+) -> str:
+    """Return a cautious failure-domain classification for one pair."""
+
+    if not gateway_result.success and not public_result.success:
+        return "LOCAL_PATH_SUSPECTED"
+
+    if gateway_result.success and not public_result.success:
+        return "UPSTREAM_PATH_SUSPECTED"
+
+    if not gateway_result.success and public_result.success:
+        return "GATEWAY_ICMP_UNAVAILABLE"
+
+    return "HEALTHY"
+
+
 # PROJECT FUNCTION: collect one local-path and public-path measurement pair.
 def collect_path_observation(
     gateway: str | None,
@@ -572,11 +593,13 @@ def collect_path_observation(
         gateway_result = ping_once(gateway, timeout_ms)
 
     public_result = ping_once(public_target, timeout_ms)
+    diagnosis = classify_path_observation(gateway_result, public_result)
 
     return PathObservation(
         timestamp=observation_timestamp,
         gateway_result=gateway_result,
         public_result=public_result,
+        diagnosis=diagnosis,
     )
 
 

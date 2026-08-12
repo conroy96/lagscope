@@ -43,7 +43,7 @@ class ClassifyPathObservationTests(unittest.TestCase):
         gateway_result = make_failed_probe("gateway")
         public_result = make_failed_probe("public")
 
-        diagnosis = classify_path_observation(gateway_result, public_result)
+        diagnosis = classify_path_observation(gateway_result, public_result, 100)
 
         self.assertEqual(diagnosis, "LOCAL_PATH_SUSPECTED")
 
@@ -51,7 +51,7 @@ class ClassifyPathObservationTests(unittest.TestCase):
         gateway_result = make_successful_probe("gateway", 2)
         public_result = make_failed_probe("public")
 
-        diagnosis = classify_path_observation(gateway_result, public_result)
+        diagnosis = classify_path_observation(gateway_result, public_result, 100)
 
         self.assertEqual(diagnosis, "UPSTREAM_PATH_SUSPECTED")
 
@@ -59,7 +59,7 @@ class ClassifyPathObservationTests(unittest.TestCase):
         gateway_result = make_failed_probe("gateway")
         public_result = make_successful_probe("public", 20)
 
-        diagnosis = classify_path_observation(gateway_result, public_result)
+        diagnosis = classify_path_observation(gateway_result, public_result, 100)
 
         self.assertEqual(diagnosis, "GATEWAY_ICMP_UNAVAILABLE")
 
@@ -67,9 +67,42 @@ class ClassifyPathObservationTests(unittest.TestCase):
         gateway_result = make_successful_probe("gateway", 2)
         public_result = make_successful_probe("public", 20)
 
-        diagnosis = classify_path_observation(gateway_result, public_result)
+        diagnosis = classify_path_observation(gateway_result, public_result, 100)
 
         self.assertEqual(diagnosis, "HEALTHY")
+
+    def test_both_slow_suspects_local_latency(self) -> None:
+        gateway_result = make_successful_probe("gateway", 150)
+        public_result = make_successful_probe("public", 180)
+
+        diagnosis = classify_path_observation(gateway_result, public_result, 100)
+
+        self.assertEqual(diagnosis, "LOCAL_LATENCY_SUSPECTED")
+
+    def test_only_public_slow_suspects_upstream_latency(self) -> None:
+        gateway_result = make_successful_probe("gateway", 2)
+        public_result = make_successful_probe("public", 180)
+
+        diagnosis = classify_path_observation(gateway_result, public_result, 100)
+
+        self.assertEqual(diagnosis, "UPSTREAM_LATENCY_SUSPECTED")
+
+    def test_only_gateway_slow_reports_gateway_icmp_slow(self) -> None:
+        gateway_result = make_successful_probe("gateway", 150)
+        public_result = make_successful_probe("public", 20)
+
+        diagnosis = classify_path_observation(gateway_result, public_result, 100)
+
+        self.assertEqual(diagnosis, "GATEWAY_ICMP_SLOW")
+
+    def test_missing_latency_reports_unavailable_measurement(self) -> None:
+        gateway_result = make_successful_probe("gateway", 2)
+        public_result = make_successful_probe("public", 20)
+        public_result.latency_ms = None
+
+        diagnosis = classify_path_observation(gateway_result, public_result, 100)
+
+        self.assertEqual(diagnosis, "LATENCY_UNAVAILABLE")
 
 
 class CollectPathObservationTests(unittest.TestCase):
@@ -87,6 +120,7 @@ class CollectPathObservationTests(unittest.TestCase):
                 gateway="192.168.1.1",
                 public_target="8.8.8.8",
                 timeout_ms=1000,
+                latency_threshold_ms=100,
             )
 
         self.assertEqual(observation.gateway_result, gateway_result)
@@ -103,6 +137,7 @@ class CollectPathObservationTests(unittest.TestCase):
                 gateway=None,
                 public_target="8.8.8.8",
                 timeout_ms=1000,
+                latency_threshold_ms=100,
             )
 
         self.assertFalse(observation.gateway_result.success)
@@ -137,6 +172,7 @@ class RunPathMonitoringTests(unittest.TestCase):
                         gateway="192.168.1.1",
                         public_target="8.8.8.8",
                         timeout_ms=1000,
+                        latency_threshold_ms=100,
                         count=2,
                         interval=0.5,
                     )

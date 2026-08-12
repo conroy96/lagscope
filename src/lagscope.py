@@ -560,8 +560,9 @@ def create_unavailable_gateway_result(timestamp: str) -> ProbeResult:
 def classify_path_observation(
     gateway_result: ProbeResult,
     public_result: ProbeResult,
+    latency_threshold_ms: int,
 ) -> str:
-    """Return a cautious failure-domain classification for one pair."""
+    """Classify reachability and latency evidence from one pair."""
 
     if not gateway_result.success and not public_result.success:
         return "LOCAL_PATH_SUSPECTED"
@@ -572,6 +573,24 @@ def classify_path_observation(
     if not gateway_result.success and public_result.success:
         return "GATEWAY_ICMP_UNAVAILABLE"
 
+    if gateway_result.latency_ms is None:
+        return "LATENCY_UNAVAILABLE"
+
+    if public_result.latency_ms is None:
+        return "LATENCY_UNAVAILABLE"
+
+    gateway_latency_high = gateway_result.latency_ms >= latency_threshold_ms
+    public_latency_high = public_result.latency_ms >= latency_threshold_ms
+
+    if gateway_latency_high and public_latency_high:
+        return "LOCAL_LATENCY_SUSPECTED"
+
+    if not gateway_latency_high and public_latency_high:
+        return "UPSTREAM_LATENCY_SUSPECTED"
+
+    if gateway_latency_high and not public_latency_high:
+        return "GATEWAY_ICMP_SLOW"
+
     return "HEALTHY"
 
 
@@ -580,6 +599,7 @@ def collect_path_observation(
     gateway: str | None,
     public_target: str,
     timeout_ms: int,
+    latency_threshold_ms: int,
 ) -> PathObservation:
     """Probe the gateway and public target and keep their results together."""
 
@@ -593,7 +613,11 @@ def collect_path_observation(
         gateway_result = ping_once(gateway, timeout_ms)
 
     public_result = ping_once(public_target, timeout_ms)
-    diagnosis = classify_path_observation(gateway_result, public_result)
+    diagnosis = classify_path_observation(
+        gateway_result,
+        public_result,
+        latency_threshold_ms,
+    )
 
     return PathObservation(
         timestamp=observation_timestamp,
@@ -608,6 +632,7 @@ def run_path_monitoring(
     gateway: str | None,
     public_target: str,
     timeout_ms: int,
+    latency_threshold_ms: int,
     count: int,
     interval: float,
 ) -> list[PathObservation]:
@@ -620,6 +645,7 @@ def run_path_monitoring(
             gateway=gateway,
             public_target=public_target,
             timeout_ms=timeout_ms,
+            latency_threshold_ms=latency_threshold_ms,
         )
         observations.append(observation)
         display_path_observation(observation_number, count, observation)
@@ -783,6 +809,13 @@ def read_command_line_settings() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--latency-threshold-ms",
+        type=int,
+        default=100,
+        help="Latency at or above which a path is considered slow (default: 100)",
+    )
+
+    parser.add_argument(
         "--count",
         type=int,
         default=5,
@@ -811,6 +844,9 @@ def read_command_line_settings() -> argparse.Namespace:
         # STANDARD LIBRARY METHOD: .error() displays the message and stops the
         # program with command-line usage information.
         parser.error("--timeout-ms must be greater than zero")
+
+    if settings.latency_threshold_ms <= 0:
+        parser.error("--latency-threshold-ms must be greater than zero")
 
     if settings.count <= 0:
         parser.error("--count must be greater than zero")
@@ -866,6 +902,7 @@ def main() -> None:
         gateway=gateway,
         public_target=settings.target,
         timeout_ms=settings.timeout_ms,
+        latency_threshold_ms=settings.latency_threshold_ms,
         count=settings.count,
         interval=settings.interval,
     )

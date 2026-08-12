@@ -1,60 +1,143 @@
 # LagScope
 
-LagScope is a Windows-first gaming network diagnostic tool. Its purpose is to
-record evidence during lag, ping spikes, and disconnects, then help distinguish
-between a local-network problem and a wider connectivity problem.
+LagScope is a Windows-first command-line tool for collecting evidence during
+gaming lag, latency spikes, and disconnects. It compares the local path to the
+default gateway with a public Internet path so that a vague report such as
+"the game lagged" becomes a more useful failure-domain hypothesis.
 
-## Current status
+## What it does
 
-The current milestone performs repeated, configurable ICMP probes and reports:
+Before monitoring, LagScope checks dependencies in order:
 
-- successful and failed probe evidence;
-- sent, received, and lost probe counts;
-- packet-loss percentage;
-- minimum, average, and maximum round-trip latency; and
-- simplified jitter, defined as the mean absolute change between consecutive
-  successful round-trip latency measurements.
+```text
+default gateway -> public IP -> DNS resolution -> TCP service
+```
 
-## Why I am building it
+During monitoring, every observation contains two consecutive ICMP probes:
 
-Games often report only a generic connection warning. That does not reveal
-whether the problem is the local gateway, the Internet connection, DNS, or the
-remote service. LagScope will test those dependencies separately and preserve
-timestamped evidence for later analysis.
+- the Windows IPv4 default gateway, representing the local LAN/Wi-Fi path;
+- a configurable public target, representing the local path plus the wider
+  Internet path.
 
-## Run LagScope
+LagScope then:
 
-From PowerShell:
+- records success, failure, latency, timestamp, and error evidence;
+- classifies likely local-path, upstream-path, or ICMP-specific degradation;
+- calculates separate gateway and public packet-loss, latency, and simplified
+  jitter summaries;
+- supports a fixed observation count or a timed gaming session;
+- preserves completed observations when stopped with `Ctrl+C`;
+- saves every paired observation to an automatically named CSV file; and
+- includes deterministic automated tests that do not depend on a live network.
+
+## Quick start
+
+Requirements:
+
+- Windows 10 or Windows 11;
+- Python 3.10 or newer; and
+- PowerShell.
+
+Create the local virtual environment once:
 
 ```powershell
-.\.venv\Scripts\python.exe .\src\lagscope.py
-.\.venv\Scripts\python.exe .\src\lagscope.py --target 8.8.8.8 --count 10 --interval 1.0 --timeout-ms 1500
+py -3 -m venv .venv
+```
+
+LagScope uses only the Python standard library, so no third-party packages are
+required.
+
+Run a short check directly:
+
+```powershell
+.\.venv\Scripts\python.exe .\src\lagscope.py --count 5
+```
+
+Run a two-hour gaming session with the PowerShell launcher:
+
+```powershell
+.\Start-LagScope.ps1 -Minutes 120
+```
+
+If the local PowerShell execution policy blocks scripts, use a process-only
+bypass:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-LagScope.ps1 -Minutes 120
+```
+
+## Useful options
+
+```powershell
+# Treat latency at or above 80 ms as slow.
+.\Start-LagScope.ps1 -Minutes 120 -LatencyThresholdMs 80
+
+# Select another public target and sampling interval.
+.\Start-LagScope.ps1 -Minutes 60 -Target 1.1.1.1 -IntervalSeconds 2
+
+# Use the Python CLI and choose a specific CSV path.
+.\.venv\Scripts\python.exe .\src\lagscope.py `
+    --duration-minutes 60 `
+    --csv .\output\ranked-session.csv
+
+# Display every accepted option.
 .\.venv\Scripts\python.exe .\src\lagscope.py --help
 ```
 
-The defaults are target `8.8.8.8`, five probes, a one-second interval, and a
-1,000-millisecond ICMP reply timeout.
+`--count` and `--duration-minutes` are mutually exclusive. If neither is
+provided, LagScope collects five paired observations.
 
-The `.venv` directory is a project-local Python environment. It keeps the
-runtime and any future packages isolated from unrelated Python projects and is
-excluded from Git because it can be recreated.
+## Interpreting classifications
 
-## Five-day target
+| Gateway evidence | Public evidence | Classification |
+|---|---|---|
+| Failed | Failed | `LOCAL_PATH_SUSPECTED` |
+| Successful | Failed | `UPSTREAM_PATH_SUSPECTED` |
+| Failed | Successful | `GATEWAY_ICMP_UNAVAILABLE` |
+| Slow | Slow | `LOCAL_LATENCY_SUSPECTED` |
+| Normal | Slow | `UPSTREAM_LATENCY_SUSPECTED` |
+| Slow | Normal | `GATEWAY_ICMP_SLOW` |
+| Successful, missing latency | Successful | `LATENCY_UNAVAILABLE` |
+| Normal | Normal | `HEALTHY` |
 
-- Discover local adapter, gateway, DNS, and routing information.
-- Probe the gateway, a public IP, DNS, and configurable remote targets.
-- Calculate latency, packet loss, and jitter. **Implemented.**
-- Store timestamped results in CSV or JSON.
-- Classify likely local, DNS, Internet-path, or remote-target incidents.
-- Include automated tests, example output, and an architecture explanation.
+These classifications narrow the likely failure domain; they do not claim to
+prove a root cause.
+
+## Evidence output
+
+If `--csv` is omitted, LagScope creates a file such as:
+
+```text
+output/lagscope-session-20260813-003000-123456.csv
+```
+
+Each row keeps the gateway and public measurements together with their shared
+observation timestamp and diagnosis. This preserves the correlation required
+to decide whether a spike was already visible on the local hop.
+
+## Run the tests
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+The tests mock live probing and elapsed time. They can therefore reproduce
+success, failure, latency, duration, and interruption scenarios without relying
+on the current Internet connection.
 
 ## Current limitations
 
-- The probe implementation currently depends on the English output format of
-  Windows `ping.exe`.
-- ICMP reachability does not prove that a remote application or TCP service is
-  healthy.
-- Jitter is a deliberately simple diagnostic measure, not an implementation of
-  RTP interarrival jitter.
-- Gateway discovery, DNS, TCP, incident classification, and report export are
-  planned for the next milestones.
+- The implementation targets Windows and parses English `ping.exe` output.
+- Gateway and public probes are consecutive rather than simultaneous.
+- ICMP may be blocked, rate-limited, or deprioritised by otherwise healthy
+  devices.
+- A successful TCP handshake proves that the port accepted a connection, not
+  that TLS or the application itself is healthy.
+- DNS results may come from a cache.
+- Diagnoses and the configurable latency threshold are heuristics.
+- CSV evidence is written when monitoring finishes or is stopped cleanly;
+  abrupt process or power failure can lose the current in-memory session.
+- The program currently discovers the Windows IPv4 default route only.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the execution flow and
+design boundaries.

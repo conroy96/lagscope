@@ -1,46 +1,103 @@
 # LagScope architecture
 
-LagScope will diagnose connectivity in dependency order:
+LagScope is organised around two related diagnostic activities:
+
+1. a startup dependency check that identifies the earliest failed layer; and
+2. repeated paired monitoring that compares the local and wider network paths.
+
+## Startup dependency flow
 
 ```text
-Local adapter
-    -> default gateway
-    -> public Internet IP
-    -> DNS resolution
-    -> remote TCP service
-    -> application response
+discover IPv4 default gateway
+        |
+        v
+gateway ICMP -> public IP ICMP -> DNS resolution -> TCP connection
+        |
+        v
+report the earliest failed dependency
 ```
 
-The current milestone implements a reusable Windows ICMP probe, repeats it at a
-configurable interval, preserves each structured `ProbeResult`, and calculates
-an aggregate `ProbeSummary` containing packet loss, latency, and simplified
-jitter statistics.
+The order matters. For example, investigating DNS first is not useful if the
+machine cannot reach its local gateway.
 
-## Current execution flow
+The TCP check establishes and immediately closes a connection. It does not
+send an HTTP request or perform a TLS handshake.
+
+## Paired monitoring flow
 
 ```text
-read_command_line_settings
-    -> run_probes
-        -> ping_once
-        -> display_probe_result
-    -> calculate_summary
-    -> display_summary
+run_path_monitoring
+        |
+        v
+collect_path_observation
+        |
+        +--> ping_once(default gateway) --> ProbeResult
+        |
+        +--> ping_once(public target) ----> ProbeResult
+        |
+        v
+classify_path_observation
+        |
+        v
+PathObservation
 ```
 
-`ProbeResult` represents one observation. `ProbeSummary` represents statistics
-calculated from all observations. Separating collection, calculation, and
-display keeps the calculation logic testable without running a live network
-probe.
+`ProbeResult` stores the evidence from one ping:
 
-## Planned components
+```text
+target, timestamp, success, latency_ms, error
+```
 
-1. **Discovery** - identifies adapters, addresses, routes, gateway, and DNS.
-2. **Probes** - performs ICMP, DNS, TCP, and HTTP tests.
-3. **Metrics** - calculates latency, packet loss, and simplified jitter.
-4. **Storage** - writes timestamped structured evidence.
-5. **Classifier** - identifies the most likely failure domain.
-6. **Reporter** - produces console and incident-report output.
+`PathObservation` groups the gateway and public `ProbeResult` objects with a
+shared observation timestamp and diagnosis. Keeping both paths together makes
+the comparison explicit in console and CSV output.
 
-The current milestone implements the ICMP portion of **Probes**, the initial
-**Metrics** component, and console output from **Reporter**. The other
-components remain planned work.
+## Session flow
+
+```text
+read and validate command-line settings
+        |
+run startup dependency checks
+        |
+monitor by count or monotonic duration
+        |
+extract gateway and public result lists
+        |
+calculate independent ProbeSummary objects
+        |
+display summaries and save paired CSV evidence
+```
+
+Count and duration modes are mutually exclusive. Duration mode uses
+`time.monotonic()` so Windows wall-clock corrections cannot make a session end
+too early or too late. `KeyboardInterrupt` is caught inside monitoring so
+completed observations can still be returned, summarised, and saved.
+
+## Classification boundary
+
+The classifier produces a likely failure-domain label from reachability and
+latency evidence. It uses cautious names such as `LOCAL_PATH_SUSPECTED` because
+two consecutive ICMP measurements cannot prove a physical root cause.
+
+Reachability is evaluated before latency. A failed probe has no numerical
+latency, so comparing latency before handling failure would be invalid.
+
+## Storage boundary
+
+The paired CSV writer creates one row per `PathObservation`. It stores both
+paths, both errors, and the classification in the same record. Files are
+automatically named with a UTC timestamp unless the user supplies `--csv`.
+
+Evidence remains in memory during collection and is written when the session
+finishes or is interrupted cleanly. Incremental crash-safe persistence is a
+possible future improvement.
+
+## Current source layout
+
+The application remains in one `src/lagscope.py` file while behaviour is still
+being developed and learned. Once the responsibilities are stable, a dedicated
+refactor can separate models, probes, monitoring, diagnosis, reporting, and CLI
+coordination without mixing structural work with feature changes.
+
+This progression keeps the Git history clear: validate behaviour first, then
+improve maintainability while preserving the tested external behaviour.

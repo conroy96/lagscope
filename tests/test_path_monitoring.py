@@ -174,6 +174,7 @@ class RunPathMonitoringTests(unittest.TestCase):
                         timeout_ms=1000,
                         latency_threshold_ms=100,
                         count=2,
+                        duration_minutes=None,
                         interval=0.5,
                     )
 
@@ -182,6 +183,72 @@ class RunPathMonitoringTests(unittest.TestCase):
             [first_observation, second_observation],
         )
         mocked_sleep.assert_called_once_with(0.5)
+
+    def test_duration_mode_stops_when_end_time_is_reached(self) -> None:
+        first_observation = PathObservation(
+            timestamp="time-1",
+            gateway_result=make_successful_probe("gateway", 1),
+            public_result=make_successful_probe("public", 10),
+            diagnosis="HEALTHY",
+        )
+        second_observation = PathObservation(
+            timestamp="time-2",
+            gateway_result=make_successful_probe("gateway", 1),
+            public_result=make_successful_probe("public", 11),
+            diagnosis="HEALTHY",
+        )
+
+        with patch(
+            "src.lagscope.collect_path_observation",
+            side_effect=[first_observation, second_observation],
+        ):
+            with patch("src.lagscope.display_path_observation"):
+                with patch("src.lagscope.time.sleep"):
+                    with patch(
+                        "src.lagscope.time.monotonic",
+                        side_effect=[0, 0, 1, 2, 7],
+                    ):
+                        observations = run_path_monitoring(
+                            gateway="192.168.1.1",
+                            public_target="8.8.8.8",
+                            timeout_ms=1000,
+                            latency_threshold_ms=100,
+                            count=None,
+                            duration_minutes=0.1,
+                            interval=0.5,
+                        )
+
+        self.assertEqual(
+            observations,
+            [first_observation, second_observation],
+        )
+
+    def test_keyboard_interrupt_preserves_collected_observations(self) -> None:
+        first_observation = PathObservation(
+            timestamp="time-1",
+            gateway_result=make_successful_probe("gateway", 1),
+            public_result=make_successful_probe("public", 10),
+            diagnosis="HEALTHY",
+        )
+
+        with patch(
+            "src.lagscope.collect_path_observation",
+            side_effect=[first_observation, KeyboardInterrupt()],
+        ):
+            with patch("src.lagscope.display_path_observation"):
+                with patch("src.lagscope.time.sleep"):
+                    with patch("builtins.print"):
+                        observations = run_path_monitoring(
+                            gateway="192.168.1.1",
+                            public_target="8.8.8.8",
+                            timeout_ms=1000,
+                            latency_threshold_ms=100,
+                            count=5,
+                            duration_minutes=None,
+                            interval=0.5,
+                        )
+
+        self.assertEqual(observations, [first_observation])
 
 
 if __name__ == "__main__":

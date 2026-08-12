@@ -506,7 +506,7 @@ def format_probe_measurement(result: ProbeResult) -> str:
 # PROJECT FUNCTION: show the two measurements from one paired observation.
 def display_path_observation(
     observation_number: int,
-    total_observations: int,
+    total_observations: int | None,
     observation: PathObservation,
 ) -> None:
     """Display gateway and public-path evidence beside each other."""
@@ -514,7 +514,11 @@ def display_path_observation(
     gateway_measurement = format_probe_measurement(observation.gateway_result)
     public_measurement = format_probe_measurement(observation.public_result)
 
-    print(f"\nObservation {observation_number} of {total_observations}")
+    if total_observations is None:
+        print(f"\nObservation {observation_number}")
+    else:
+        print(f"\nObservation {observation_number} of {total_observations}")
+
     print(f"Timestamp: {observation.timestamp}")
     print(f"Gateway:  {gateway_measurement}")
     print(f"Public:   {public_measurement}")
@@ -633,26 +637,49 @@ def run_path_monitoring(
     public_target: str,
     timeout_ms: int,
     latency_threshold_ms: int,
-    count: int,
+    count: int | None,
+    duration_minutes: float | None,
     interval: float,
 ) -> list[PathObservation]:
-    """Collect and return the requested number of paired observations."""
+    """Collect paired observations until the count or duration is reached."""
 
     observations: list[PathObservation] = []
 
-    for observation_number in range(1, count + 1):
-        observation = collect_path_observation(
-            gateway=gateway,
-            public_target=public_target,
-            timeout_ms=timeout_ms,
-            latency_threshold_ms=latency_threshold_ms,
-        )
-        observations.append(observation)
-        display_path_observation(observation_number, count, observation)
+    end_time = None
+    if duration_minutes is not None:
+        duration_seconds = duration_minutes * 60
+        end_time = time.monotonic() + duration_seconds
 
-        # Wait between observations, but do not wait after the final one.
-        if observation_number < count:
+    try:
+        while True:
+            if count is not None:
+                if len(observations) >= count:
+                    break
+
+            if end_time is not None:
+                if time.monotonic() >= end_time:
+                    break
+
+            observation = collect_path_observation(
+                gateway=gateway,
+                public_target=public_target,
+                timeout_ms=timeout_ms,
+                latency_threshold_ms=latency_threshold_ms,
+            )
+            observations.append(observation)
+
+            observation_number = len(observations)
+            display_path_observation(observation_number, count, observation)
+
+            count_finished = count is not None and observation_number >= count
+            duration_finished = end_time is not None and time.monotonic() >= end_time
+
+            if count_finished or duration_finished:
+                break
+
             time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nMonitoring stopped by user; preserving collected evidence.")
 
     return observations
 
@@ -815,11 +842,20 @@ def read_command_line_settings() -> argparse.Namespace:
         help="Latency at or above which a path is considered slow (default: 100)",
     )
 
-    parser.add_argument(
+    monitoring_limit = parser.add_mutually_exclusive_group()
+
+    monitoring_limit.add_argument(
         "--count",
         type=int,
-        default=5,
-        help="Number of probes to run (default is set to 5)",
+        default=None,
+        help="Number of paired observations to collect (default: 5)",
+    )
+
+    monitoring_limit.add_argument(
+        "--duration-minutes",
+        type=float,
+        default=None,
+        help="Minutes to monitor instead of using a fixed observation count",
     )
 
     parser.add_argument(
@@ -840,6 +876,9 @@ def read_command_line_settings() -> argparse.Namespace:
     # PowerShell and returns an argparse.Namespace containing their values.
     settings = parser.parse_args()
 
+    if settings.count is None and settings.duration_minutes is None:
+        settings.count = 5
+
     if settings.timeout_ms <= 0:
         # STANDARD LIBRARY METHOD: .error() displays the message and stops the
         # program with command-line usage information.
@@ -848,8 +887,12 @@ def read_command_line_settings() -> argparse.Namespace:
     if settings.latency_threshold_ms <= 0:
         parser.error("--latency-threshold-ms must be greater than zero")
 
-    if settings.count <= 0:
+    if settings.count is not None and settings.count <= 0:
         parser.error("--count must be greater than zero")
+
+    if settings.duration_minutes is not None:
+        if settings.duration_minutes <= 0:
+            parser.error("--duration-minutes must be greater than zero")
 
     if settings.interval < 0:
         parser.error("--interval must be 0 or greater")
@@ -904,6 +947,7 @@ def main() -> None:
         timeout_ms=settings.timeout_ms,
         latency_threshold_ms=settings.latency_threshold_ms,
         count=settings.count,
+        duration_minutes=settings.duration_minutes,
         interval=settings.interval,
     )
 

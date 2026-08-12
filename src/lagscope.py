@@ -42,6 +42,15 @@ class ProbeResult:
     latency_ms: int | None
     error: str | None
 
+# PROJECT CODE: PathObservation groups the two probes from one monitoring cycle.
+@dataclass
+class PathObservation:
+    """A paired snapshot of the local and Internet paths."""
+
+    timestamp: str
+    gateway_result: ProbeResult
+    public_result: ProbeResult
+
 
 # PROJECT CODE: ProbeSummary stores statistics calculated from several probes.
 @dataclass
@@ -280,11 +289,12 @@ def ping_once(target: str, timeout_ms: int) -> ProbeResult:
         error=None,
     )
 
-# PROJECT FUNCTION: discover and test the local IPv4 default gateway.
-def check_default_gateway(timeout_ms: int) -> DiagnosticCheck:
-    """Return a diagnostic result for the local default gateway."""
-
-    gateway = discover_default_gateway()
+# PROJECT FUNCTION: test a previously discovered IPv4 default gateway.
+def check_default_gateway(
+    gateway: str | None,
+    timeout_ms: int,
+) -> DiagnosticCheck:
+    """Return a diagnostic result for the supplied default gateway."""
 
     if gateway is None:
         return DiagnosticCheck(
@@ -479,6 +489,36 @@ def display_probe_result(
         print(f"Error:     {result.error}")
 
 
+# PROJECT FUNCTION: convert one probe result into a short display value.
+def format_probe_measurement(result: ProbeResult) -> str:
+    """Return a compact success, latency, or failure description."""
+
+    if not result.success:
+        return f"FAILED ({result.error})"
+
+    if result.latency_ms is None:
+        return "OK (latency unavailable)"
+
+    return f"OK ({result.latency_ms} ms)"
+
+
+# PROJECT FUNCTION: show the two measurements from one paired observation.
+def display_path_observation(
+    observation_number: int,
+    total_observations: int,
+    observation: PathObservation,
+) -> None:
+    """Display gateway and public-path evidence beside each other."""
+
+    gateway_measurement = format_probe_measurement(observation.gateway_result)
+    public_measurement = format_probe_measurement(observation.public_result)
+
+    print(f"\nObservation {observation_number} of {total_observations}")
+    print(f"Timestamp: {observation.timestamp}")
+    print(f"Gateway:  {gateway_measurement}")
+    print(f"Public:   {public_measurement}")
+
+
 def run_probes(
     target: str,
     timeout_ms: int,
@@ -499,6 +539,73 @@ def run_probes(
             time.sleep(interval)
 
     return results
+
+
+# PROJECT FUNCTION: represent a gateway that Windows could not discover.
+def create_unavailable_gateway_result(timestamp: str) -> ProbeResult:
+    """Return failed probe evidence when no default gateway was discovered."""
+
+    return ProbeResult(
+        target="default gateway",
+        timestamp=timestamp,
+        success=False,
+        latency_ms=None,
+        error="No IPv4 default route was found",
+    )
+
+
+# PROJECT FUNCTION: collect one local-path and public-path measurement pair.
+def collect_path_observation(
+    gateway: str | None,
+    public_target: str,
+    timeout_ms: int,
+) -> PathObservation:
+    """Probe the gateway and public target and keep their results together."""
+
+    # Record when this paired monitoring cycle began. Each individual
+    # ProbeResult also retains the exact time at which its own ping began.
+    observation_timestamp = datetime.now(timezone.utc).isoformat()
+
+    if gateway is None:
+        gateway_result = create_unavailable_gateway_result(observation_timestamp)
+    else:
+        gateway_result = ping_once(gateway, timeout_ms)
+
+    public_result = ping_once(public_target, timeout_ms)
+
+    return PathObservation(
+        timestamp=observation_timestamp,
+        gateway_result=gateway_result,
+        public_result=public_result,
+    )
+
+
+# PROJECT FUNCTION: repeat paired path measurements at a controlled interval.
+def run_path_monitoring(
+    gateway: str | None,
+    public_target: str,
+    timeout_ms: int,
+    count: int,
+    interval: float,
+) -> list[PathObservation]:
+    """Collect and return the requested number of paired observations."""
+
+    observations: list[PathObservation] = []
+
+    for observation_number in range(1, count + 1):
+        observation = collect_path_observation(
+            gateway=gateway,
+            public_target=public_target,
+            timeout_ms=timeout_ms,
+        )
+        observations.append(observation)
+        display_path_observation(observation_number, count, observation)
+
+        # Wait between observations, but do not wait after the final one.
+        if observation_number < count:
+            time.sleep(interval)
+
+    return observations
 
 
 def calculate_summary(results: list[ProbeResult]) -> ProbeSummary:
@@ -704,7 +811,8 @@ def main() -> None:
     settings = read_command_line_settings()
 
     print("Dependency checks")
-    gateway_check = check_default_gateway(settings.timeout_ms)
+    gateway = discover_default_gateway()
+    gateway_check = check_default_gateway(gateway, settings.timeout_ms)
     display_diagnostic_check(gateway_check)
 
     public_ip_check = check_public_ip("1.1.1.1", settings.timeout_ms)
@@ -730,18 +838,28 @@ def main() -> None:
     print("\nDiagnosis")
     print(diagnosis)
 
-    print("\nTarget monitoring")
-    results = run_probes(
-        target=settings.target,
+    print("\nPaired path monitoring")
+    observations = run_path_monitoring(
+        gateway=gateway,
+        public_target=settings.target,
         timeout_ms=settings.timeout_ms,
         count=settings.count,
         interval=settings.interval,
     )
-    summary = calculate_summary(results)
+
+    # The existing summary and CSV functions accept a list of ProbeResult
+    # objects. Extract the public result from each paired observation so those
+    # existing functions remain usable during this development checkpoint.
+    public_results: list[ProbeResult] = []
+
+    for observation in observations:
+        public_results.append(observation.public_result)
+
+    summary = calculate_summary(public_results)
     display_summary(summary)
 
     if settings.csv is not None:
-        save_results_to_csv(settings.csv, results)
+        save_results_to_csv(settings.csv, public_results)
         print(f"\nCSV saved to: {settings.csv}")
 
 # PYTHON RUNTIME CONVENTION: when this file is run directly, Python sets

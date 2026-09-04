@@ -1,7 +1,4 @@
-"""LagScope Day 1 proof of concept.
-
-Run one Windows ping probe and report the result in a predictable format.
-"""
+"""LagScope V2 network-path monitor and layered diagnostic tool."""
 
 # Comment key used throughout this file:
 # PROJECT CODE: written specifically for LagScope.
@@ -14,10 +11,17 @@ Run one Windows ping probe and report the result in a predictable format.
 import argparse
 # STANDARD LIBRARY: csv writes probe records in a spreadsheet-friendly format.
 import csv
+
+# STANDARD LIBRARY: http.client creates HTTP and HTTPS connections and requests.
+import http.client
+
 # STANDARD LIBRARY: re searches text using regular-expression patterns.
 import re
 # STANDARD LIBRARY: socket provides DNS lookups and TCP connections.
 import socket
+
+# STANDARD LIBRARY: ssl provides TLS encryption and certificate-related errors.
+import ssl
 # STANDARD LIBRARY: subprocess starts another program and captures its result.
 import subprocess
 # STANDARD LIBRARY: time provides sleep(), which pauses the current program.
@@ -29,6 +33,8 @@ from datetime import datetime, timezone
 # STANDARD LIBRARY: Path provides readable, cross-platform file-path operations.
 from pathlib import Path
 
+
+VERSION = "2.0.0"
 
 # STANDARD LIBRARY: @dataclass generates ProbeResult.__init__ for us.
 # PROJECT CODE: ProbeResult defines the five values LagScope records.
@@ -75,6 +81,34 @@ class DiagnosticCheck:
     name: str
     success: bool
     detail: str
+
+
+# PROJECT CODE: SessionAssessment stores the interpreted result of a complete
+# paired-monitoring session rather than evidence from only one observation.
+@dataclass
+class SessionAssessment:
+    """A session-level summary of path classifications."""
+
+    total_observations: int
+    healthy_observations: int
+    degraded_observations: int
+    diagnosis_counts: dict[str, int]
+    dominant_diagnosis: str | None
+    conclusion: str
+
+
+# PROJECT DATA: a fixed order makes output deterministic and resolves ties by
+# preferring the classifications that provide the strongest failure evidence.
+PATH_DIAGNOSIS_ORDER = (
+    "LOCAL_PATH_SUSPECTED",
+    "UPSTREAM_PATH_SUSPECTED",
+    "LOCAL_LATENCY_SUSPECTED",
+    "UPSTREAM_LATENCY_SUSPECTED",
+    "GATEWAY_ICMP_UNAVAILABLE",
+    "GATEWAY_ICMP_SLOW",
+    "LATENCY_UNAVAILABLE",
+    "HEALTHY",
+)
 
 
 # PROJECT FUNCTION: inspect Windows ping text for known failure phrases.
@@ -417,6 +451,8 @@ def check_tcp_service(
             detail=detail,
         )
 
+
+
     # STANDARD LIBRARY METHOD: close() releases this test connection immediately.
     # LagScope only needs to prove that the TCP handshake can be established.
     connection.close()
@@ -429,11 +465,67 @@ def check_tcp_service(
         detail=detail,
     )
 
+# PROJECT FUNCTION: test TLS and HTTP above the TCP transport layer.
+def check_https_application(
+    hostname: str,
+    port: int,
+    timeout_ms: int,
+) -> DiagnosticCheck:
+    """Test whether an HTTPS service completes TLS and returns an HTTP response."""
+
+    # http.client expects seconds, while LagScope accepts milliseconds.
+    timeout_seconds = timeout_ms / 1000
+
+    # STANDARD LIBRARY: HTTPSConnection stores the destination and timeout.
+    # It does not contact the server until we send a request.
+    connection = http.client.HTTPSConnection(
+        hostname,
+        port=port,
+        timeout=timeout_seconds,
+    )
+
+    try:
+        connection.request("HEAD", "/")
+        response = connection.getresponse()
+
+    except ssl.SSLError as error:
+        return DiagnosticCheck(
+            name="HTTPS application",
+            success=False,
+            detail=f"{hostname}:{port} failed TLS: {error}",
+        )
+    except (OSError, http.client.HTTPException) as error:
+        return DiagnosticCheck(
+            name="HTTPS application",
+            success=False,
+            detail=f"{hostname}:{port} failed HTTPS: {error}",
+        )
+    finally:
+        # STANDARD LIBRARY METHOD: close() releases the connection whether the
+        # request succeeded or raised an exception.
+        connection.close()
+
+    status_code = response.status
+    reason = response.reason
+    # 2xx and 3xx responses indicate a successful request or redirect. A 4xx or
+    # 5xx response still proves that HTTP replied, but it indicates that the
+    # requested application path was not successful.
+    http_succeeded = 200 <= status_code < 400
+
+    return DiagnosticCheck(
+        name="HTTPS application",
+        success=http_succeeded,
+        detail=f"{hostname}:{port} returned HTTP {status_code} {reason}",
+    )
+
+
+
 def diagnose_dependencies(
     gateway_check: DiagnosticCheck,
     public_ip_check: DiagnosticCheck,
     dns_check: DiagnosticCheck,
     tcp_check: DiagnosticCheck,
+    https_check: DiagnosticCheck,
 ) -> str:
     """Identify the earliest failed dependency in the network path."""
 
@@ -448,6 +540,9 @@ def diagnose_dependencies(
 
     if not tcp_check.success:
         return "Likely service-path problem: DNS worked but the TCP connection failed."
+
+    if not https_check.success:
+        return f"Likely HTTPS application-layer problem: {https_check.detail}"
 
     return "No dependency failure detected."
 
@@ -684,6 +779,129 @@ def run_path_monitoring(
     return observations
 
 
+# PROJECT FUNCTION: turn all per-observation classifications into one cautious
+# session-level assessment that a person can use as a troubleshooting lead.
+def calculate_session_assessment(
+    observations: list[PathObservation],
+) -> SessionAssessment:
+    """Count classifications and describe the dominant non-healthy pattern."""
+
+    diagnosis_counts: dict[str, int] = {}
+
+    for observation in observations:
+        diagnosis = observation.diagnosis
+        current_count = diagnosis_counts.get(diagnosis, 0)
+        diagnosis_counts[diagnosis] = current_count + 1
+
+    total_observations = len(observations)
+    healthy_observations = diagnosis_counts.get("HEALTHY", 0)
+    degraded_observations = total_observations - healthy_observations
+
+    if total_observations == 0:
+        return SessionAssessment(
+            total_observations=0,
+            healthy_observations=0,
+            degraded_observations=0,
+            diagnosis_counts=diagnosis_counts,
+            dominant_diagnosis=None,
+            conclusion="No observations were collected, so the path could not be assessed.",
+        )
+
+    if degraded_observations == 0:
+        return SessionAssessment(
+            total_observations=total_observations,
+            healthy_observations=healthy_observations,
+            degraded_observations=0,
+            diagnosis_counts=diagnosis_counts,
+            dominant_diagnosis=None,
+            conclusion=(
+                "No degradation was detected during this sample. This does not prove "
+                "the connection is always healthy."
+            ),
+        )
+
+    dominant_diagnosis = None
+    dominant_count = 0
+
+    # Iterate through a fixed priority order so equal counts always produce the
+    # same result. HEALTHY is excluded because we want the dominant problem.
+    for diagnosis in PATH_DIAGNOSIS_ORDER:
+        if diagnosis == "HEALTHY":
+            continue
+
+        count = diagnosis_counts.get(diagnosis, 0)
+        if count > dominant_count:
+            dominant_diagnosis = diagnosis
+            dominant_count = count
+
+    conclusions = {
+        "LOCAL_PATH_SUSPECTED": (
+            "Local-path failures were the most frequent issue. Investigate the local "
+            "interface, Wi-Fi or Ethernet link, switch path, and default gateway."
+        ),
+        "UPSTREAM_PATH_SUSPECTED": (
+            "The gateway remained reachable while the public target failed. Investigate "
+            "the ISP or upstream route, while remembering that the target may block ICMP."
+        ),
+        "LOCAL_LATENCY_SUSPECTED": (
+            "High latency was already visible at the gateway. Investigate local congestion, "
+            "Wi-Fi contention, interface errors, or gateway load."
+        ),
+        "UPSTREAM_LATENCY_SUSPECTED": (
+            "The gateway remained responsive while public latency was high. Investigate "
+            "the ISP, upstream route, or destination path."
+        ),
+        "GATEWAY_ICMP_UNAVAILABLE": (
+            "The public target replied while the gateway did not. The gateway may block or "
+            "deprioritise ICMP, so this alone does not prove a local failure."
+        ),
+        "GATEWAY_ICMP_SLOW": (
+            "Public latency remained normal while gateway ICMP was slow. The gateway may "
+            "deprioritise ICMP; corroborate this result with other evidence."
+        ),
+        "LATENCY_UNAVAILABLE": (
+            "Some replies succeeded but their latency could not be parsed, so latency-based "
+            "classification was unavailable for those observations."
+        ),
+    }
+
+    conclusion = conclusions.get(
+        dominant_diagnosis,
+        "Non-healthy observations were recorded, but no known pattern dominated.",
+    )
+
+    return SessionAssessment(
+        total_observations=total_observations,
+        healthy_observations=healthy_observations,
+        degraded_observations=degraded_observations,
+        diagnosis_counts=diagnosis_counts,
+        dominant_diagnosis=dominant_diagnosis,
+        conclusion=conclusion,
+    )
+
+
+# PROJECT FUNCTION: display the session interpretation separately from raw
+# evidence and numerical latency summaries.
+def display_session_assessment(assessment: SessionAssessment) -> None:
+    """Display classification counts and the cautious session conclusion."""
+
+    print("\nSession assessment")
+    print(f"Observations: {assessment.total_observations}")
+    print(f"Healthy:      {assessment.healthy_observations}")
+    print(f"Non-healthy:  {assessment.degraded_observations}")
+
+    print("Classifications:")
+    for diagnosis in PATH_DIAGNOSIS_ORDER:
+        count = assessment.diagnosis_counts.get(diagnosis, 0)
+        if count > 0:
+            print(f"  {diagnosis}: {count}")
+
+    if assessment.dominant_diagnosis is not None:
+        print(f"Dominant issue: {assessment.dominant_diagnosis}")
+
+    print(f"Conclusion: {assessment.conclusion}")
+
+
 def calculate_summary(results: list[ProbeResult]) -> ProbeSummary:
     """Calculate packet loss, latency, and simplified jitter statistics."""
 
@@ -861,7 +1079,13 @@ def display_summary(summary: ProbeSummary, heading: str = "Summary") -> None:
 def read_command_line_settings() -> argparse.Namespace:
     # STANDARD LIBRARY: ArgumentParser creates the command-line parser.
     parser = argparse.ArgumentParser(
-        description="Run the LagScope Day 1 network probe."
+        description="Run LagScope V2 network diagnostics and path monitoring."
+    )
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"LagScope {VERSION}",
     )
 
     # STANDARD LIBRARY METHOD: .add_argument defines an accepted option,
@@ -872,16 +1096,16 @@ def read_command_line_settings() -> argparse.Namespace:
         help="IP address or hostname to probe (default: 8.8.8.8)",
     )
     parser.add_argument(
-    "--service-host",
-    default="example.com",
-    help="Hostname to test with DNS and TCP (default: example.com)",
+        "--service-host",
+        default="example.com",
+        help="Hostname to test with DNS, TCP, TLS, and HTTP (default: example.com)",
     )
 
     parser.add_argument(
         "--service-port",
         type=int,
         default=443,
-        help="TCP service port to test (default: 443)",
+        help="HTTPS service port to test (default: 443)",
     )
     parser.add_argument(
         "--timeout-ms",
@@ -922,9 +1146,9 @@ def read_command_line_settings() -> argparse.Namespace:
     )
 
     parser.add_argument(
-    "--csv",
-    default=None,
-    help="Optional path for saving timestamped probe results as CSV",
+        "--csv",
+        default=None,
+        help="Optional path for saving timestamped probe results as CSV",
     )
 
     # STANDARD LIBRARY METHOD: .parse_args() reads the arguments supplied in
@@ -979,17 +1203,25 @@ def main() -> None:
     display_diagnostic_check(dns_check)
 
     tcp_check = check_tcp_service(
-    settings.service_host,
-    settings.service_port,
-    settings.timeout_ms,
+        settings.service_host,
+        settings.service_port,
+        settings.timeout_ms,
     )
     display_diagnostic_check(tcp_check)
 
+    https_check = check_https_application(
+        settings.service_host,
+        settings.service_port,
+        settings.timeout_ms,
+    )
+    display_diagnostic_check(https_check)
+
     diagnosis = diagnose_dependencies(
-    gateway_check,
-    public_ip_check,
-    dns_check,
-    tcp_check,
+        gateway_check,
+        public_ip_check,
+        dns_check,
+        tcp_check,
+        https_check,
     )
 
     print("\nDiagnosis")
@@ -1009,6 +1241,9 @@ def main() -> None:
     if not observations:
         print("\nNo monitoring observations were collected.")
         return
+
+    session_assessment = calculate_session_assessment(observations)
+    display_session_assessment(session_assessment)
 
     # The existing summary and CSV functions accept a list of ProbeResult
     # objects. Extract each side of the paired observations into its own list.

@@ -11,7 +11,7 @@ LagScope is organised around two related diagnostic activities:
 discover IPv4 default gateway
         |
         v
-gateway ICMP -> public IP ICMP -> DNS resolution -> TCP connection
+gateway ICMP -> public IP ICMP -> DNS resolution -> TCP connection -> TLS/HTTPS
         |
         v
 report the earliest failed dependency
@@ -20,8 +20,11 @@ report the earliest failed dependency
 The order matters. For example, investigating DNS first is not useful if the
 machine cannot reach its local gateway.
 
-The TCP check establishes and immediately closes a connection. It does not
-send an HTTP request or perform a TLS handshake.
+The TCP check establishes and immediately closes a connection. The separate
+HTTPS check then negotiates TLS, validates the certificate using Python's
+default trust store, sends `HEAD /`, and records the HTTP status. Keeping these
+checks separate distinguishes transport reachability from application-layer
+behaviour.
 
 ## Paired monitoring flow
 
@@ -65,6 +68,8 @@ extract gateway and public result lists
         |
 calculate independent ProbeSummary objects
         |
+calculate one SessionAssessment from all classifications
+        |
 display summaries and save paired CSV evidence
 ```
 
@@ -72,6 +77,11 @@ Count and duration modes are mutually exclusive. Duration mode uses
 `time.monotonic()` so Windows wall-clock corrections cannot make a session end
 too early or too late. `KeyboardInterrupt` is caught inside monitoring so
 completed observations can still be returned, summarised, and saved.
+
+`SessionAssessment` counts the classifications from every `PathObservation`,
+reports the most frequent non-healthy pattern, and maps it to a cautious next
+troubleshooting step. It preserves the distinction between evidence and
+interpretation: the underlying paired observations remain available in CSV.
 
 ## Classification boundary
 

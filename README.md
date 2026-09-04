@@ -1,4 +1,4 @@
-# LagScope
+# LagScope 2.0
 
 LagScope is a Windows-first command-line tool for collecting evidence during
 gaming lag, latency spikes, and disconnects. It compares the local path to the
@@ -10,7 +10,7 @@ default gateway with a public Internet path so that a vague report such as
 Before monitoring, LagScope checks dependencies in order:
 
 ```text
-default gateway -> public IP -> DNS resolution -> TCP service
+default gateway -> public IP -> DNS resolution -> TCP service -> TLS/HTTPS
 ```
 
 During monitoring, every observation contains two consecutive ICMP probes:
@@ -23,12 +23,27 @@ LagScope then:
 
 - records success, failure, latency, timestamp, and error evidence;
 - classifies likely local-path, upstream-path, or ICMP-specific degradation;
+- produces a session-level assessment from the frequency of those classifications;
 - calculates separate gateway and public packet-loss, latency, and simplified
   jitter summaries;
 - supports a fixed observation count or a timed gaming session;
 - preserves completed observations when stopped with `Ctrl+C`;
 - saves every paired observation to an automatically named CSV file; and
 - includes deterministic automated tests that do not depend on a live network.
+
+## LagScope and Wireshark
+
+LagScope is not a packet-capture replacement. Wireshark captures and dissects
+individual frames and packets from an interface. LagScope instead runs a small,
+controlled set of active checks and interprets their results as a likely failure
+domain.
+
+The tools complement one another:
+
+1. use LagScope during a gaming session to timestamp a problem and decide whether
+   the evidence points toward the local path, upstream path, DNS, TCP, or HTTPS;
+2. use Wireshark when packet-level evidence is needed to investigate that narrowed
+   area in greater depth.
 
 ## Quick start
 
@@ -51,6 +66,12 @@ Run a short check directly:
 
 ```powershell
 .\.venv\Scripts\python.exe .\src\lagscope.py --count 5
+```
+
+Check the installed project version:
+
+```powershell
+.\.venv\Scripts\python.exe .\src\lagscope.py --version
 ```
 
 Run a two-hour gaming session with the PowerShell launcher:
@@ -115,15 +136,22 @@ Each row keeps the gateway and public measurements together with their shared
 observation timestamp and diagnosis. This preserves the correlation required
 to decide whether a spike was already visible on the local hop.
 
+At the end of a session, LagScope also displays:
+
+- the number of healthy and non-healthy observations;
+- a count for every observed classification;
+- the most frequent non-healthy classification; and
+- a cautious troubleshooting conclusion based on that pattern.
+
 ## Run the tests
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The tests mock live probing and elapsed time. They can therefore reproduce
-success, failure, latency, duration, and interruption scenarios without relying
-on the current Internet connection.
+The tests mock live probing, HTTPS connections, and elapsed time. They can
+therefore reproduce success, failure, latency, TLS, HTTP, duration, and
+interruption scenarios without relying on the current Internet connection.
 
 ## Current limitations
 
@@ -131,8 +159,9 @@ on the current Internet connection.
 - Gateway and public probes are consecutive rather than simultaneous.
 - ICMP may be blocked, rate-limited, or deprioritised by otherwise healthy
   devices.
-- A successful TCP handshake proves that the port accepted a connection, not
-  that TLS or the application itself is healthy.
+- The HTTPS check sends `HEAD /` to one configured service. A successful result
+  does not prove every application path or transaction is healthy.
+- Some valid applications reject `HEAD` requests or require a different path.
 - DNS results may come from a cache.
 - Diagnoses and the configurable latency threshold are heuristics.
 - CSV evidence is written when monitoring finishes or is stopped cleanly;

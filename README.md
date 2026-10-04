@@ -1,5 +1,9 @@
 # LagScope 2.0
 
+[![Tests](https://github.com/conroy96/lagscope/actions/workflows/tests.yml/badge.svg)](https://github.com/conroy96/lagscope/actions/workflows/tests.yml)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Release](https://img.shields.io/github/v/tag/conroy96/lagscope?label=release)](https://github.com/conroy96/lagscope/releases)
+
 LagScope is a Windows-first command-line tool for collecting evidence during
 gaming lag, latency spikes, and disconnects. It compares the local path to the
 default gateway with a public Internet path so that a vague report such as
@@ -30,6 +34,34 @@ LagScope then:
 - preserves completed observations when stopped with `Ctrl+C`;
 - saves every paired observation to an automatically named CSV file; and
 - includes deterministic automated tests that do not depend on a live network.
+
+## Example session
+
+The exact addresses and timings vary by network, but a short healthy run looks
+like this:
+
+```text
+Dependency checks
+[PASS] Default gateway: 192.168.1.1 replied in 1 ms
+[PASS] Public IP: 1.1.1.1 replied in 6 ms
+[PASS] DNS resolution: example.com resolved successfully
+[PASS] TCP service: example.com:443 accepted a TCP connection
+[PASS] HTTPS application: example.com:443 returned HTTP 200 OK
+
+Diagnosis
+No dependency failure detected.
+
+Paired path monitoring
+Gateway:  OK (1 ms)
+Public:   OK (5 ms)
+Diagnosis: HEALTHY
+
+Session assessment
+No repeated path degradation detected in the collected observations.
+```
+
+LagScope reports evidence and a cautious failure-domain hypothesis. It does not
+claim that a successful sample proves the entire Internet connection is healthy.
 
 ## LagScope and Wireshark
 
@@ -170,3 +202,10 @@ interruption scenarios without relying on the current Internet connection.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the execution flow and
 design boundaries.
+
+## Project documentation
+
+- [Architecture and diagnostic boundaries](docs/ARCHITECTURE.md)
+- [Python code guide](docs/PYTHON_CODE_GUIDE.md)
+- [Interview demonstration guide](docs/INTERVIEW_DEMO.md)
+- [Version history](CHANGELOG.md)

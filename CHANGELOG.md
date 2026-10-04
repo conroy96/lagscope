@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Use the configured public target consistently for dependency checks and
+  paired monitoring.
+- Persist each completed observation immediately instead of waiting for the end
+  of the session.
+- Add direct tests for Windows route and ping output parsing.
+- Replace tutorial-style source annotations with concise implementation comments.
+
 ## 2.0.0
 
 - Added a distinct TLS and HTTPS application-layer dependency check.

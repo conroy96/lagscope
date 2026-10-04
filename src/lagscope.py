@@ -1,43 +1,20 @@
 """LagScope V2 network-path monitor and layered diagnostic tool."""
 
-# Comment key used throughout this file:
-# PROJECT CODE: written specifically for LagScope.
-# PYTHON BUILT-IN: available without importing a module.
-# STANDARD LIBRARY: supplied with Python, but imported from a module.
-# PYTHON SYNTAX: part of the Python language rather than a callable function.
-# Detailed references: docs/PYTHON_CODE_GUIDE.md
-
-# STANDARD LIBRARY: argparse reads and validates command-line options.
 import argparse
-# STANDARD LIBRARY: csv writes probe records in a spreadsheet-friendly format.
 import csv
-
-# STANDARD LIBRARY: http.client creates HTTP and HTTPS connections and requests.
 import http.client
-
-# STANDARD LIBRARY: re searches text using regular-expression patterns.
 import re
-# STANDARD LIBRARY: socket provides DNS lookups and TCP connections.
 import socket
-
-# STANDARD LIBRARY: ssl provides TLS encryption and certificate-related errors.
 import ssl
-# STANDARD LIBRARY: subprocess starts another program and captures its result.
 import subprocess
-# STANDARD LIBRARY: time provides sleep(), which pauses the current program.
 import time
-# STANDARD LIBRARY: dataclass generates data-storage methods for a class.
 from dataclasses import dataclass
-# STANDARD LIBRARY: datetime and timezone create a UTC timestamp.
 from datetime import datetime, timezone
-# STANDARD LIBRARY: Path provides readable, cross-platform file-path operations.
 from pathlib import Path
 
 
 VERSION = "2.0.0"
 
-# STANDARD LIBRARY: @dataclass generates ProbeResult.__init__ for us.
-# PROJECT CODE: ProbeResult defines the five values LagScope records.
 @dataclass
 class ProbeResult:
     """The evidence collected from one network probe."""
@@ -48,7 +25,6 @@ class ProbeResult:
     latency_ms: int | None
     error: str | None
 
-# PROJECT CODE: PathObservation groups the two probes from one monitoring cycle.
 @dataclass
 class PathObservation:
     """A paired snapshot of the local and Internet paths."""
@@ -59,7 +35,6 @@ class PathObservation:
     diagnosis: str
 
 
-# PROJECT CODE: ProbeSummary stores statistics calculated from several probes.
 @dataclass
 class ProbeSummary:
     """Aggregate measurements calculated from a collection of probes."""
@@ -73,7 +48,6 @@ class ProbeSummary:
     maximum_latency_ms: int | None
     average_jitter_ms: float | None
 
-# PROJECT CODE: DiagnosticCheck records the outcome of one dependency check.
 @dataclass
 class DiagnosticCheck:
     """The result of checking one network dependency."""
@@ -83,8 +57,6 @@ class DiagnosticCheck:
     detail: str
 
 
-# PROJECT CODE: SessionAssessment stores the interpreted result of a complete
-# paired-monitoring session rather than evidence from only one observation.
 @dataclass
 class SessionAssessment:
     """A session-level summary of path classifications."""
@@ -97,8 +69,7 @@ class SessionAssessment:
     conclusion: str
 
 
-# PROJECT DATA: a fixed order makes output deterministic and resolves ties by
-# preferring the classifications that provide the strongest failure evidence.
+# Keep output deterministic and prefer stronger failure evidence when counts tie.
 PATH_DIAGNOSIS_ORDER = (
     "LOCAL_PATH_SUSPECTED",
     "UPSTREAM_PATH_SUSPECTED",
@@ -110,8 +81,19 @@ PATH_DIAGNOSIS_ORDER = (
     "HEALTHY",
 )
 
+PATH_OBSERVATION_HEADER = (
+    "observation_timestamp_utc",
+    "diagnosis",
+    "gateway_target",
+    "gateway_success",
+    "gateway_latency_ms",
+    "gateway_error",
+    "public_target",
+    "public_success",
+    "public_latency_ms",
+    "public_error",
+)
 
-# PROJECT FUNCTION: inspect Windows ping text for known failure phrases.
 def output_contains_failure(ping_output: str) -> bool:
     """Return True when Windows ping reports a known failure message."""
 
@@ -122,12 +104,8 @@ def output_contains_failure(ping_output: str) -> bool:
         "general failure",
     ]
 
-    # BUILT-IN str METHOD: .lower() returns a lowercase copy of the string.
-    # This makes the search ignore capitalisation differences.
     lowercase_output = ping_output.lower()
 
-    # PYTHON SYNTAX: for examines each item in the list one at a time.
-    # PYTHON SYNTAX: "in" checks whether text occurs inside other text.
     for failure_message in failure_messages:
         if failure_message in lowercase_output:
             return True
@@ -135,12 +113,9 @@ def output_contains_failure(ping_output: str) -> bool:
     return False
 
 
-# PROJECT FUNCTION: choose useful error text to show to the user.
 def find_failure_message(ping_output: str, error_output: str) -> str:
     """Choose the most useful error message produced by Windows ping."""
 
-    # BUILT-IN str METHOD: .strip() removes whitespace and newlines from
-    # the beginning and end of a string.
     cleaned_error_output = error_output.strip()
     if cleaned_error_output:
         return cleaned_error_output
@@ -152,8 +127,6 @@ def find_failure_message(ping_output: str, error_output: str) -> str:
         "general failure",
     ]
 
-    # BUILT-IN str METHOD: .splitlines() turns one multiline string into
-    # separate strings so that each output line can be inspected.
     for line in ping_output.splitlines():
         lowercase_line = line.lower()
 
@@ -165,7 +138,6 @@ def find_failure_message(ping_output: str, error_output: str) -> str:
 
 
 
-# PROJECT FUNCTION: extract the gateway from Windows route-table output.
 def extract_default_gateway(route_output: str) -> str | None:
     """Return the gateway from the first IPv4 default-route row."""
 
@@ -186,7 +158,6 @@ def extract_default_gateway(route_output: str) -> str | None:
     return None
 
 
-# PROJECT FUNCTION: run the Windows route command and discover the gateway.
 def discover_default_gateway() -> str | None:
     """Run route.exe and return the active IPv4 default gateway."""
 
@@ -213,57 +184,26 @@ def discover_default_gateway() -> str | None:
     return gateway
 
 
-# PROJECT FUNCTION: extract the numerical latency from successful ping text.
 def extract_latency_ms(ping_output: str) -> int | None:
     """Extract the latency number from text such as 'time=6ms'."""
 
-    # STANDARD LIBRARY: re.search(pattern, text, option) scans ping_output
-    # until it finds text matching the regular-expression pattern.
-    #
-    # r"..." is a raw string, so Python leaves the backslash in \d unchanged.
-    # Pattern breakdown:
-    #   time    = match the literal word "time"
-    #   [=<]    = match one character: either "=" or "<"
-    #   (\d+)   = capture one or more digits; for example, capture "6"
-    #   ms      = match the literal unit "ms"
-    # re.IGNORECASE allows "time", "Time", or "TIME" to match.
     latency_pattern = r"time[=<](\d+)ms"
     latency_match = re.search(latency_pattern, ping_output, re.IGNORECASE)
 
     if latency_match is None:
         return None
 
-    # STANDARD LIBRARY: a successful re.search returns a Match object.
-    # .group(1) returns the text captured by the first (...) group.
     latency_text = latency_match.group(1)
-
-    # PYTHON BUILT-IN: int("6") converts the text "6" to the number 6.
-    latency_ms = int(latency_text)
-    return latency_ms
+    return int(latency_text)
 
 
-# PROJECT FUNCTION: perform one Windows ping and return structured evidence.
 def ping_once(target: str, timeout_ms: int) -> ProbeResult:
     """Send one ICMP echo request using the Windows ping command."""
 
-    # STANDARD LIBRARY: now(timezone.utc) gets the current UTC time.
-    # datetime METHOD: .isoformat() converts it to consistent timestamp text.
     timestamp = datetime.now(timezone.utc).isoformat()
-
-    # PYTHON BUILT-IN: str() converts the timeout number to command-line text.
-    # This list represents: ping -n 1 -w <timeout_ms> <target>
     command = ["ping", "-n", "1", "-w", str(timeout_ms), target]
 
-    # PYTHON SYNTAX: try/except lets us handle expected execution errors.
     try:
-        # STANDARD LIBRARY: subprocess.run starts ping.exe as a child process
-        # and waits for it to finish.
-        #   command: the program is item 0; later items are its arguments.
-        #   capture_output=True: save stdout and stderr for our code to inspect.
-        #   text=True: return captured output as strings instead of bytes.
-        #   timeout=...: stop waiting if the whole ping process hangs.
-        #   check=False: return the result instead of raising an exception when
-        #                ping.exe uses a non-zero return code.
         ping_process = subprocess.run(
             command,
             capture_output=True,
@@ -271,7 +211,6 @@ def ping_once(target: str, timeout_ms: int) -> ProbeResult:
             timeout=(timeout_ms / 1000) + 2,
             check=False,
         )
-    # STANDARD LIBRARY EXCEPTION: raised if subprocess.run exceeds its timeout.
     except subprocess.TimeoutExpired:
         return ProbeResult(
             target=target,
@@ -280,8 +219,6 @@ def ping_once(target: str, timeout_ms: int) -> ProbeResult:
             latency_ms=None,
             error="command timed out",
         )
-    # PYTHON BUILT-IN EXCEPTION: raised for OS problems such as being unable
-    # to start ping.exe. "as" stores the exception in our named variable.
     except OSError as operating_system_error:
         return ProbeResult(
             target=target,
@@ -291,17 +228,11 @@ def ping_once(target: str, timeout_ms: int) -> ProbeResult:
             error=str(operating_system_error),
         )
 
-    # STANDARD LIBRARY: subprocess.run returns a CompletedProcess object.
-    # .stdout is normal captured output; .stderr is captured error output.
     ping_output = ping_process.stdout
     error_output = ping_process.stderr
-
-    # PROJECT FUNCTION CALL: inspect stdout for Windows failure messages.
     windows_reported_failure = output_contains_failure(ping_output)
 
-    # .returncode is supplied by CompletedProcess. Zero usually means the
-    # program ran successfully, but Windows ping may still print "unreachable".
-    # PYTHON SYNTAX: "or" makes probe_failed True if either check is True.
+    # Windows ping can report an unreachable destination with a zero return code.
     probe_failed = ping_process.returncode != 0 or windows_reported_failure
 
     if probe_failed:
@@ -314,7 +245,6 @@ def ping_once(target: str, timeout_ms: int) -> ProbeResult:
             error=error_message,
         )
 
-    # PROJECT FUNCTION CALL: obtain latency only after ruling out failure.
     latency_ms = extract_latency_ms(ping_output)
     return ProbeResult(
         target=target,
@@ -324,7 +254,6 @@ def ping_once(target: str, timeout_ms: int) -> ProbeResult:
         error=None,
     )
 
-# PROJECT FUNCTION: test a previously discovered IPv4 default gateway.
 def check_default_gateway(
     gateway: str | None,
     timeout_ms: int,
@@ -367,8 +296,6 @@ def check_default_gateway(
 def check_public_ip(target: str, timeout_ms: int) -> DiagnosticCheck:
     """Test routed Internet connectivity using a known public IP address."""
 
-    # PROJECT FUNCTION: ping_once() always returns a ProbeResult object.
-    # We inspect the object's success field to learn whether the probe worked.
     public_ip_result = ping_once(target, timeout_ms)
 
     if public_ip_result.success:
@@ -383,8 +310,6 @@ def check_public_ip(target: str, timeout_ms: int) -> DiagnosticCheck:
             detail=detail,
         )
 
-    # A failed ProbeResult should normally contain an error explanation.
-    # The fallback keeps this function safe if that explanation is ever absent.
     if public_ip_result.error is not None:
         failure_reason = public_ip_result.error
     else:
@@ -428,21 +353,15 @@ def check_tcp_service(
 ) -> DiagnosticCheck:
     """Test whether a TCP connection can be established to a service port."""
 
-    # socket.create_connection() expects its timeout in seconds, whereas the
-    # LagScope command line accepts milliseconds. Dividing by 1000 converts it.
+    # The socket API accepts seconds; the CLI accepts milliseconds.
     timeout_seconds = timeout_ms / 1000
 
-    # STANDARD LIBRARY: socket.create_connection() asks the operating system to
-    # establish a TCP connection. The tuple identifies the remote endpoint:
-    # hostname identifies the node, and port identifies the service on it.
     try:
         connection = socket.create_connection(
             (hostname, port),
             timeout=timeout_seconds,
         )
     except OSError as error:
-        # Python networking failures such as a refusal or timeout are represented
-        # by OSError subclasses. Catching them prevents the whole tool crashing.
         detail = f"{hostname}:{port} could not establish TCP: {error}"
 
         return DiagnosticCheck(
@@ -450,11 +369,6 @@ def check_tcp_service(
             success=False,
             detail=detail,
         )
-
-
-
-    # STANDARD LIBRARY METHOD: close() releases this test connection immediately.
-    # LagScope only needs to prove that the TCP handshake can be established.
     connection.close()
 
     detail = f"{hostname}:{port} accepted a TCP connection"
@@ -465,7 +379,6 @@ def check_tcp_service(
         detail=detail,
     )
 
-# PROJECT FUNCTION: test TLS and HTTP above the TCP transport layer.
 def check_https_application(
     hostname: str,
     port: int,
@@ -473,11 +386,8 @@ def check_https_application(
 ) -> DiagnosticCheck:
     """Test whether an HTTPS service completes TLS and returns an HTTP response."""
 
-    # http.client expects seconds, while LagScope accepts milliseconds.
     timeout_seconds = timeout_ms / 1000
 
-    # STANDARD LIBRARY: HTTPSConnection stores the destination and timeout.
-    # It does not contact the server until we send a request.
     connection = http.client.HTTPSConnection(
         hostname,
         port=port,
@@ -501,8 +411,6 @@ def check_https_application(
             detail=f"{hostname}:{port} failed HTTPS: {error}",
         )
     finally:
-        # STANDARD LIBRARY METHOD: close() releases the connection whether the
-        # request succeeded or raised an exception.
         connection.close()
 
     status_code = response.status
@@ -585,7 +493,6 @@ def display_probe_result(
         print(f"Error:     {result.error}")
 
 
-# PROJECT FUNCTION: convert one probe result into a short display value.
 def format_probe_measurement(result: ProbeResult) -> str:
     """Return a compact success, latency, or failure description."""
 
@@ -598,7 +505,6 @@ def format_probe_measurement(result: ProbeResult) -> str:
     return f"OK ({result.latency_ms} ms)"
 
 
-# PROJECT FUNCTION: show the two measurements from one paired observation.
 def display_path_observation(
     observation_number: int,
     total_observations: int | None,
@@ -642,7 +548,6 @@ def run_probes(
     return results
 
 
-# PROJECT FUNCTION: represent a gateway that Windows could not discover.
 def create_unavailable_gateway_result(timestamp: str) -> ProbeResult:
     """Return failed probe evidence when no default gateway was discovered."""
 
@@ -655,7 +560,6 @@ def create_unavailable_gateway_result(timestamp: str) -> ProbeResult:
     )
 
 
-# PROJECT FUNCTION: classify one paired observation by reachability.
 def classify_path_observation(
     gateway_result: ProbeResult,
     public_result: ProbeResult,
@@ -693,7 +597,6 @@ def classify_path_observation(
     return "HEALTHY"
 
 
-# PROJECT FUNCTION: collect one local-path and public-path measurement pair.
 def collect_path_observation(
     gateway: str | None,
     public_target: str,
@@ -726,7 +629,6 @@ def collect_path_observation(
     )
 
 
-# PROJECT FUNCTION: repeat paired path measurements at a controlled interval.
 def run_path_monitoring(
     gateway: str | None,
     public_target: str,
@@ -735,10 +637,14 @@ def run_path_monitoring(
     count: int | None,
     duration_minutes: float | None,
     interval: float,
+    csv_path: str | None = None,
 ) -> list[PathObservation]:
-    """Collect paired observations until the count or duration is reached."""
+    """Collect paired observations and persist them as they arrive."""
 
     observations: list[PathObservation] = []
+
+    if csv_path is not None:
+        initialize_path_observation_csv(csv_path)
 
     end_time = None
     if duration_minutes is not None:
@@ -763,6 +669,9 @@ def run_path_monitoring(
             )
             observations.append(observation)
 
+            if csv_path is not None:
+                append_path_observation_to_csv(csv_path, observation)
+
             observation_number = len(observations)
             display_path_observation(observation_number, count, observation)
 
@@ -779,8 +688,6 @@ def run_path_monitoring(
     return observations
 
 
-# PROJECT FUNCTION: turn all per-observation classifications into one cautious
-# session-level assessment that a person can use as a troubleshooting lead.
 def calculate_session_assessment(
     observations: list[PathObservation],
 ) -> SessionAssessment:
@@ -880,8 +787,6 @@ def calculate_session_assessment(
     )
 
 
-# PROJECT FUNCTION: display the session interpretation separately from raw
-# evidence and numerical latency summaries.
 def display_session_assessment(assessment: SessionAssessment) -> None:
     """Display classification counts and the cautious session conclusion."""
 
@@ -961,27 +866,15 @@ def calculate_summary(results: list[ProbeResult]) -> ProbeSummary:
 def save_results_to_csv(file_path: str, results: list[ProbeResult]) -> None:
     """Save timestamped probe evidence to a CSV file."""
 
-    # STANDARD LIBRARY CLASS: Path converts command-line text into an object
-    # with methods for creating folders and opening the output file.
     output_path = Path(file_path)
-
-    # STANDARD LIBRARY METHOD: mkdir() creates the parent directory. parents=True
-    # creates any missing directories in the path; exist_ok=True prevents an error
-    # when the directory already exists.
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # PYTHON SYNTAX: with automatically closes the file when this block finishes,
-    # including if an unexpected error occurs while rows are being written.
     with output_path.open(
         mode="w",
         newline="",
         encoding="utf-8",
     ) as csv_file:
-        # STANDARD LIBRARY: csv.writer() creates an object that converts Python
-        # values into correctly escaped comma-separated rows.
         writer = csv.writer(csv_file)
-
-        # STANDARD LIBRARY METHOD: writerow() writes one complete CSV row.
         writer.writerow(
             ["target", "timestamp_utc", "success", "latency_ms", "error"]
         )
@@ -1006,6 +899,46 @@ def create_session_csv_path() -> str:
     return str(output_path)
 
 
+def path_observation_to_row(observation: PathObservation) -> list[object]:
+    """Convert one paired observation into its CSV representation."""
+
+    return [
+        observation.timestamp,
+        observation.diagnosis,
+        observation.gateway_result.target,
+        observation.gateway_result.success,
+        observation.gateway_result.latency_ms,
+        observation.gateway_result.error,
+        observation.public_result.target,
+        observation.public_result.success,
+        observation.public_result.latency_ms,
+        observation.public_result.error,
+    ]
+
+
+def initialize_path_observation_csv(file_path: str) -> None:
+    """Create a paired-observation CSV and write its header."""
+
+    output_path = Path(file_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open(mode="w", newline="", encoding="utf-8") as csv_file:
+        csv.writer(csv_file).writerow(PATH_OBSERVATION_HEADER)
+
+
+def append_path_observation_to_csv(
+    file_path: str,
+    observation: PathObservation,
+) -> None:
+    """Append and flush one observation so completed evidence survives a crash."""
+
+    output_path = Path(file_path)
+    with output_path.open(mode="a", newline="", encoding="utf-8") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(path_observation_to_row(observation))
+        csv_file.flush()
+
+
 def save_path_observations_to_csv(
     file_path: str,
     observations: list[PathObservation],
@@ -1021,36 +954,10 @@ def save_path_observations_to_csv(
         encoding="utf-8",
     ) as csv_file:
         writer = csv.writer(csv_file)
-        writer.writerow(
-            [
-                "observation_timestamp_utc",
-                "diagnosis",
-                "gateway_target",
-                "gateway_success",
-                "gateway_latency_ms",
-                "gateway_error",
-                "public_target",
-                "public_success",
-                "public_latency_ms",
-                "public_error",
-            ]
-        )
+        writer.writerow(PATH_OBSERVATION_HEADER)
 
         for observation in observations:
-            writer.writerow(
-                [
-                    observation.timestamp,
-                    observation.diagnosis,
-                    observation.gateway_result.target,
-                    observation.gateway_result.success,
-                    observation.gateway_result.latency_ms,
-                    observation.gateway_result.error,
-                    observation.public_result.target,
-                    observation.public_result.success,
-                    observation.public_result.latency_ms,
-                    observation.public_result.error,
-                ]
-            )
+            writer.writerow(path_observation_to_row(observation))
 
 
 def display_summary(summary: ProbeSummary, heading: str = "Summary") -> None:
@@ -1075,9 +982,11 @@ def display_summary(summary: ProbeSummary, heading: str = "Summary") -> None:
         print("Jitter:      Not enough successful replies")
 
 
-# PROJECT FUNCTION: define, read, and validate LagScope's command-line options.
-def read_command_line_settings() -> argparse.Namespace:
-    # STANDARD LIBRARY: ArgumentParser creates the command-line parser.
+def read_command_line_settings(
+    arguments: list[str] | None = None,
+) -> argparse.Namespace:
+    """Parse and validate command-line settings."""
+
     parser = argparse.ArgumentParser(
         description="Run LagScope V2 network diagnostics and path monitoring."
     )
@@ -1088,8 +997,6 @@ def read_command_line_settings() -> argparse.Namespace:
         version=f"LagScope {VERSION}",
     )
 
-    # STANDARD LIBRARY METHOD: .add_argument defines an accepted option,
-    # its default value, conversion type, and --help description.
     parser.add_argument(
         "--target",
         default="8.8.8.8",
@@ -1151,16 +1058,12 @@ def read_command_line_settings() -> argparse.Namespace:
         help="Optional path for saving timestamped probe results as CSV",
     )
 
-    # STANDARD LIBRARY METHOD: .parse_args() reads the arguments supplied in
-    # PowerShell and returns an argparse.Namespace containing their values.
-    settings = parser.parse_args()
+    settings = parser.parse_args(arguments)
 
     if settings.count is None and settings.duration_minutes is None:
         settings.count = 5
 
     if settings.timeout_ms <= 0:
-        # STANDARD LIBRARY METHOD: .error() displays the message and stops the
-        # program with command-line usage information.
         parser.error("--timeout-ms must be greater than zero")
 
     if settings.latency_threshold_ms <= 0:
@@ -1187,7 +1090,6 @@ def read_command_line_settings() -> argparse.Namespace:
 
 
 
-# PROJECT FUNCTION: coordinate the program's steps and display the result.
 def main() -> None:
     settings = read_command_line_settings()
 
@@ -1196,7 +1098,7 @@ def main() -> None:
     gateway_check = check_default_gateway(gateway, settings.timeout_ms)
     display_diagnostic_check(gateway_check)
 
-    public_ip_check = check_public_ip("1.1.1.1", settings.timeout_ms)
+    public_ip_check = check_public_ip(settings.target, settings.timeout_ms)
     display_diagnostic_check(public_ip_check)
 
     dns_check = check_dns(settings.service_host)
@@ -1227,6 +1129,11 @@ def main() -> None:
     print("\nDiagnosis")
     print(diagnosis)
 
+    if settings.csv is None:
+        csv_path = create_session_csv_path()
+    else:
+        csv_path = settings.csv
+
     print("\nPaired path monitoring")
     observations = run_path_monitoring(
         gateway=gateway,
@@ -1236,17 +1143,17 @@ def main() -> None:
         count=settings.count,
         duration_minutes=settings.duration_minutes,
         interval=settings.interval,
+        csv_path=csv_path,
     )
 
     if not observations:
         print("\nNo monitoring observations were collected.")
+        print(f"CSV saved to: {csv_path}")
         return
 
     session_assessment = calculate_session_assessment(observations)
     display_session_assessment(session_assessment)
 
-    # The existing summary and CSV functions accept a list of ProbeResult
-    # objects. Extract each side of the paired observations into its own list.
     gateway_results: list[ProbeResult] = []
     public_results: list[ProbeResult] = []
 
@@ -1260,16 +1167,7 @@ def main() -> None:
     display_summary(gateway_summary, "Gateway summary")
     display_summary(public_summary, "Public target summary")
 
-    if settings.csv is None:
-        csv_path = create_session_csv_path()
-    else:
-        csv_path = settings.csv
-
-    save_path_observations_to_csv(csv_path, observations)
     print(f"\nCSV saved to: {csv_path}")
 
-# PYTHON RUNTIME CONVENTION: when this file is run directly, Python sets
-# __name__ to "__main__". This prevents main() running if another file imports
-# lagscope as a module.
 if __name__ == "__main__":
     main()

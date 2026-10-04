@@ -35,14 +35,11 @@ class SaveResultsToCsvTests(unittest.TestCase):
             ),
         ]
 
-        # STANDARD LIBRARY: TemporaryDirectory creates an isolated folder for
-        # this test and automatically removes it when the with block finishes.
         with tempfile.TemporaryDirectory() as temporary_folder:
             output_path = Path(temporary_folder) / "nested" / "session.csv"
 
             save_results_to_csv(str(output_path), results)
 
-            # Open the saved evidence and parse it using the standard CSV reader.
             with output_path.open(
                 mode="r",
                 newline="",

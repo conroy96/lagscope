@@ -167,7 +167,5 @@ class CheckHttpsApplicationTests(unittest.TestCase):
         self.assertIn("failed HTTPS", result.detail)
 
 
-# PYTHON RUNTIME CONVENTION: allow this test file to be run directly as well as
-# discovered by "python -m unittest discover".
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,8 @@
 
 [![Tests](https://github.com/conroy96/lagscope/actions/workflows/tests.yml/badge.svg)](https://github.com/conroy96/lagscope/actions/workflows/tests.yml)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Release](https://img.shields.io/github/v/tag/conroy96/lagscope?label=release)](https://github.com/conroy96/lagscope/releases)
+
+> **Status:** Functional portfolio prototype under active development.
 
 LagScope is a Windows-first command-line tool for collecting evidence during
 gaming lag, latency spikes, and disconnects. It compares the local path to the
@@ -32,7 +33,8 @@ LagScope then:
   jitter summaries;
 - supports a fixed observation count or a timed gaming session;
 - preserves completed observations when stopped with `Ctrl+C`;
-- saves every paired observation to an automatically named CSV file; and
+- writes every completed observation immediately to an automatically named CSV
+  file; and
 - includes deterministic automated tests that do not depend on a live network.
 
 ## Example session
@@ -43,7 +45,7 @@ like this:
 ```text
 Dependency checks
 [PASS] Default gateway: 192.168.1.1 replied in 1 ms
-[PASS] Public IP: 1.1.1.1 replied in 6 ms
+[PASS] Public IP: 8.8.8.8 replied in 6 ms
 [PASS] DNS resolution: example.com resolved successfully
 [PASS] TCP service: example.com:443 accepted a TCP connection
 [PASS] HTTPS application: example.com:443 returned HTTP 200 OK
@@ -166,7 +168,9 @@ output/lagscope-session-20260813-003000-123456.csv
 
 Each row keeps the gateway and public measurements together with their shared
 observation timestamp and diagnosis. This preserves the correlation required
-to decide whether a spike was already visible on the local hop.
+to decide whether a spike was already visible on the local hop. LagScope creates
+the file before monitoring and flushes each completed observation immediately,
+so a later crash or power loss does not erase the evidence already collected.
 
 At the end of a session, LagScope also displays:
 
@@ -181,9 +185,10 @@ At the end of a session, LagScope also displays:
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The tests mock live probing, HTTPS connections, and elapsed time. They can
-therefore reproduce success, failure, latency, TLS, HTTP, duration, and
-interruption scenarios without relying on the current Internet connection.
+The tests cover Windows command-output parsing and mock live probing, HTTPS
+connections, elapsed time, and interruptions. They reproduce success, failure,
+latency, TLS, HTTP, duration, and persistence scenarios without relying on the
+current Internet connection.
 
 ## Current limitations
 
@@ -196,9 +201,14 @@ interruption scenarios without relying on the current Internet connection.
 - Some valid applications reject `HEAD` requests or require a different path.
 - DNS results may come from a cache.
 - Diagnoses and the configurable latency threshold are heuristics.
-- CSV evidence is written when monitoring finishes or is stopped cleanly;
-  abrupt process or power failure can lose the current in-memory session.
 - The program currently discovers the Windows IPv4 default route only.
+
+## Roadmap
+
+- Run the gateway and public probes concurrently for tighter time correlation.
+- Separate probing, diagnosis, reporting, and CLI coordination into modules once
+  the behaviour is stable.
+- Support additional Windows output languages and network interfaces.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the execution flow and
 design boundaries.
@@ -206,6 +216,6 @@ design boundaries.
 ## Project documentation
 
 - [Architecture and diagnostic boundaries](docs/ARCHITECTURE.md)
-- [Python code guide](docs/PYTHON_CODE_GUIDE.md)
+- [Implementation notes](docs/IMPLEMENTATION_NOTES.md)
 - [Interview demonstration guide](docs/INTERVIEW_DEMO.md)
 - [Version history](CHANGELOG.md)

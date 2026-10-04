@@ -1,6 +1,9 @@
 """Automated tests for LagScope's paired path monitoring."""
 
+import csv
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from src.lagscope import (
@@ -231,24 +234,34 @@ class RunPathMonitoringTests(unittest.TestCase):
             diagnosis="HEALTHY",
         )
 
-        with patch(
-            "src.lagscope.collect_path_observation",
-            side_effect=[first_observation, KeyboardInterrupt()],
-        ):
-            with patch("src.lagscope.display_path_observation"):
-                with patch("src.lagscope.time.sleep"):
-                    with patch("builtins.print"):
-                        observations = run_path_monitoring(
-                            gateway="192.168.1.1",
-                            public_target="8.8.8.8",
-                            timeout_ms=1000,
-                            latency_threshold_ms=100,
-                            count=5,
-                            duration_minutes=None,
-                            interval=0.5,
-                        )
+        with tempfile.TemporaryDirectory() as temporary_folder:
+            csv_path = Path(temporary_folder) / "interrupted-session.csv"
+
+            with patch(
+                "src.lagscope.collect_path_observation",
+                side_effect=[first_observation, KeyboardInterrupt()],
+            ):
+                with patch("src.lagscope.display_path_observation"):
+                    with patch("src.lagscope.time.sleep"):
+                        with patch("builtins.print"):
+                            observations = run_path_monitoring(
+                                gateway="192.168.1.1",
+                                public_target="8.8.8.8",
+                                timeout_ms=1000,
+                                latency_threshold_ms=100,
+                                count=5,
+                                duration_minutes=None,
+                                interval=0.5,
+                                csv_path=str(csv_path),
+                            )
+
+            with csv_path.open(newline="", encoding="utf-8") as csv_file:
+                persisted_rows = list(csv.reader(csv_file))
 
         self.assertEqual(observations, [first_observation])
+        self.assertEqual(len(persisted_rows), 2)
+        self.assertEqual(persisted_rows[1][0], "time-1")
+        self.assertEqual(persisted_rows[1][1], "HEALTHY")
 
 
 if __name__ == "__main__":

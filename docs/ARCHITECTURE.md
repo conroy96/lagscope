@@ -98,9 +98,10 @@ The paired CSV writer creates one row per `PathObservation`. It stores both
 paths, both errors, and the classification in the same record. Files are
 automatically named with a UTC timestamp unless the user supplies `--csv`.
 
-Evidence remains in memory during collection and is written when the session
-finishes or is interrupted cleanly. Incremental crash-safe persistence is a
-possible future improvement.
+The file and header are created before monitoring starts. Each completed
+observation is appended and flushed immediately. Results also remain in memory
+for the end-of-session assessment, but completed CSV evidence no longer depends
+on a clean shutdown.
 
 ## Current source layout
 
